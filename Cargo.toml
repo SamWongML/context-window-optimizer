@@ -1,0 +1,104 @@
+[package]
+name = "ctx-optim"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Context Window Optimizer — intelligent context selection for LLM agents"
+license = "MIT"
+
+[dependencies]
+# ── Async Runtime ──
+tokio = { version = "1", features = ["full"] }
+
+# ── MCP Server (delivery layer) ──
+rmcp = { version = "1.2", features = ["server", "transport-io"] }
+schemars = "1.0"              # JSON Schema for MCP tool params
+
+# ── CLI ──
+clap = { version = "4", features = ["derive", "env"] }
+
+# ── Serialization ──
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"                  # Config file parsing
+
+# ── Token Counting ──
+tiktoken = "0.5"              # Pure Rust, 9 encodings, 5 providers, zero-alloc count()
+# Alternative: tiktoken-rs for OpenAI-specific models with chat token math
+# Alternative: bpe + bpe-openai for 4x speed + interval counting (GitHub's impl)
+
+# ── AST / Code Analysis (Phase 2) ──
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+
+# ── File Discovery & Git ──
+ignore = "0.4"                # .gitignore-aware recursive walk (used by ripgrep)
+git2 = "0.19"                 # libgit2 — recency, blame, change detection
+walkdir = "2"                 # Fallback for non-git dirs
+
+# ── Hashing / Dedup ──
+md-5 = "0.10"                 # Exact-match dedup
+siphasher = "1"               # Fast hashing for SimHash base
+
+# ── Error Handling ──
+thiserror = "2"               # Library error types
+anyhow = "1"                  # Application-level errors
+
+# ── Observability ──
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# ── Config ──
+dotenvy = "0.15"
+
+# ── Concurrency ──
+dashmap = "6"                 # Lock-free concurrent hashmap for index cache
+rayon = "1.10"                # Parallel file scoring
+
+# ── Persistence (optional, for feedback loop) ──
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+# ── File Watching (incremental re-index) ──
+notify = { version = "7", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+insta = { version = "1", features = ["yaml"] }
+mockall = "0.13"
+tempfile = "3"
+assert_cmd = "2"              # CLI integration tests
+predicates = "3"              # CLI output assertions
+tokio-test = "0.4"
+
+[features]
+default = ["mcp"]
+mcp = []
+watch = ["dep:notify"]
+feedback = ["dep:rusqlite"]
+full = ["mcp", "watch", "feedback"]
+
+[[bin]]
+name = "ctx-optim"
+path = "src/main.rs"
+
+[[bench]]
+name = "scoring"
+harness = false
+
+[[bench]]
+name = "knapsack"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+# Faster dev builds — link with lld if available
+# See .cargo/config.toml

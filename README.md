@@ -1,1 +1,1 @@
-# context_window_optimizer
+# context-window-optimizer
