@@ -190,4 +190,132 @@ mod tests {
         let s = proximity_signal(Path::new("tests/integration/mod.rs"), &focus);
         assert!((0.0..=1.0).contains(&s));
     }
+
+    #[test]
+    fn test_proximity_signal_same_file_is_maximum() {
+        use std::path::PathBuf;
+        let focus = vec![PathBuf::from("src/lib.rs")];
+        let same = proximity_signal(Path::new("src/lib.rs"), &focus);
+        let diff = proximity_signal(Path::new("benches/knapsack.rs"), &focus);
+        // Same file should have equal or better proximity than anything else
+        assert!(same >= diff);
+    }
+
+    #[test]
+    fn test_proximity_signal_multiple_focus_paths_uses_max() {
+        use std::path::PathBuf;
+        let focus = vec![
+            PathBuf::from("src/scoring/mod.rs"),
+            PathBuf::from("benches/knapsack.rs"),
+        ];
+        let candidate = Path::new("benches/scoring.rs");
+        // The candidate is close to benches/knapsack.rs, so should score reasonably high
+        let score = proximity_signal(candidate, &focus);
+        let score_single = proximity_signal(candidate, &[PathBuf::from("src/scoring/mod.rs")]);
+        // With more focus paths including a close one, score should be >= single
+        assert!(score >= score_single);
+    }
+
+    #[test]
+    fn test_entry_recency_signal_uses_git_when_present() {
+        use crate::types::{FileEntry, FileMetadata, GitMetadata};
+        use std::time::SystemTime;
+        let entry = FileEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            token_count: 100,
+            hash: [0u8; 16],
+            metadata: FileMetadata {
+                size_bytes: 400,
+                last_modified: SystemTime::UNIX_EPOCH, // very old filesystem time
+                git: Some(GitMetadata {
+                    age_days: 1.0, // but recently committed
+                    commit_count: 5,
+                }),
+                language: None,
+            },
+        };
+        // Git age (1 day) should dominate over filesystem time (epoch = very old)
+        let score = entry_recency_signal(&entry);
+        // 1 day old should score close to 1.0 (half-life is 30 days)
+        assert!(score > 0.9, "expected high recency for 1-day-old file, got {score}");
+    }
+
+    #[test]
+    fn test_entry_recency_signal_falls_back_to_filesystem() {
+        use crate::types::{FileEntry, FileMetadata};
+        use std::time::SystemTime;
+        let entry = FileEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            token_count: 100,
+            hash: [0u8; 16],
+            metadata: FileMetadata {
+                size_bytes: 400,
+                last_modified: SystemTime::now(), // just modified
+                git: None,                        // no git metadata
+                language: None,
+            },
+        };
+        let score = entry_recency_signal(&entry);
+        // File just modified → should score close to 1.0
+        assert!(score > 0.95, "recently modified file should score high, got {score}");
+    }
+
+    // ── Property-based tests ──────────────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_recency_signal_always_in_0_1(age_days in 0.0f64..3650.0) {
+            let s = recency_signal(age_days);
+            prop_assert!(
+                (0.0f32..=1.0).contains(&s),
+                "recency_signal({age_days}) = {s} out of [0, 1]"
+            );
+        }
+
+        #[test]
+        fn prop_size_signal_always_in_0_1(tokens in 0usize..1_000_000) {
+            let s = size_signal(tokens);
+            prop_assert!(
+                (0.0f32..=1.0).contains(&s),
+                "size_signal({tokens}) = {s} out of [0, 1]"
+            );
+        }
+
+        #[test]
+        fn prop_recency_signal_monotone_decreasing(a in 0.0f64..1000.0, b in 0.0f64..1000.0) {
+            let (young, old) = if a <= b { (a, b) } else { (b, a) };
+            let s_young = recency_signal(young);
+            let s_old = recency_signal(old);
+            prop_assert!(
+                s_young >= s_old,
+                "recency_signal({young}) = {s_young} < recency_signal({old}) = {s_old}"
+            );
+        }
+
+        #[test]
+        fn prop_size_signal_monotone_decreasing(a in 0usize..100_000, b in 0usize..100_000) {
+            let (small, large) = if a <= b { (a, b) } else { (b, a) };
+            let s_small = size_signal(small);
+            let s_large = size_signal(large);
+            prop_assert!(
+                s_small >= s_large,
+                "size_signal({small}) = {s_small} < size_signal({large}) = {s_large}"
+            );
+        }
+
+        #[test]
+        fn prop_proximity_signal_always_in_0_1(
+            path_a in "[a-z]{2,8}/[a-z]{2,8}\\.rs",
+            path_b in "[a-z]{2,8}/[a-z]{2,8}\\.rs",
+        ) {
+            let focus = vec![std::path::PathBuf::from(&path_b)];
+            let s = proximity_signal(Path::new(&path_a), &focus);
+            prop_assert!(
+                (0.0f32..=1.0).contains(&s),
+                "proximity_signal = {s} out of [0, 1]"
+            );
+        }
+    }
 }

@@ -182,6 +182,136 @@ impl Default for Budget {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Language ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_language_from_extension_all_known() {
+        assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+        assert_eq!(Language::from_extension("ts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("js"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("jsx"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("mjs"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("cjs"), Some(Language::JavaScript));
+        assert_eq!(Language::from_extension("py"), Some(Language::Python));
+        assert_eq!(Language::from_extension("pyi"), Some(Language::Python));
+        assert_eq!(Language::from_extension("go"), Some(Language::Go));
+    }
+
+    #[test]
+    fn test_language_from_extension_unknown_returns_none() {
+        assert_eq!(Language::from_extension("xyz"), None);
+        assert_eq!(Language::from_extension(""), None);
+        assert_eq!(Language::from_extension("md"), None);
+        assert_eq!(Language::from_extension("toml"), None);
+        assert_eq!(Language::from_extension("json"), None);
+        assert_eq!(Language::from_extension("RS"), None); // case-sensitive
+    }
+
+    // ── Budget ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_budget_standard_correct_split() {
+        let b = Budget::standard(100_000);
+        assert_eq!(b.l1_tokens(), 5_000);
+        assert_eq!(b.l2_tokens(), 25_000);
+        assert_eq!(b.l3_tokens(), 70_000);
+    }
+
+    #[test]
+    fn test_budget_standard_percentages_sum_to_one() {
+        let b = Budget::standard(128_000);
+        let sum = b.l1_pct + b.l2_pct + b.l3_pct;
+        assert!((sum - 1.0).abs() < 1e-6, "percentages sum to {sum}, expected 1.0");
+    }
+
+    #[test]
+    fn test_budget_levels_never_exceed_total() {
+        for total in [1_000usize, 8_000, 128_000, 1_000_000] {
+            let b = Budget::standard(total);
+            assert!(b.l1_tokens() <= total);
+            assert!(b.l2_tokens() <= total);
+            assert!(b.l3_tokens() <= total);
+        }
+    }
+
+    #[test]
+    fn test_budget_default_is_128k() {
+        assert_eq!(Budget::default().total_tokens, 128_000);
+    }
+
+    // ── ScoredEntry::efficiency ───────────────────────────────────────────────
+
+    fn make_scored(token_count: usize, score: f32) -> ScoredEntry {
+        ScoredEntry {
+            entry: FileEntry {
+                path: PathBuf::from("src/lib.rs"),
+                token_count,
+                hash: [0u8; 16],
+                metadata: FileMetadata {
+                    size_bytes: token_count as u64 * 4,
+                    last_modified: SystemTime::now(),
+                    git: None,
+                    language: None,
+                },
+            },
+            composite_score: score,
+            signals: ScoreSignals::default(),
+        }
+    }
+
+    #[test]
+    fn test_efficiency_normal_case() {
+        let e = make_scored(200, 0.8);
+        let eff = e.efficiency();
+        assert!((eff - 0.004).abs() < 1e-6, "expected 0.004, got {eff}");
+    }
+
+    #[test]
+    fn test_efficiency_zero_tokens_returns_zero() {
+        let e = make_scored(0, 0.9);
+        assert_eq!(e.efficiency(), 0.0, "zero tokens should yield 0.0 efficiency");
+    }
+
+    #[test]
+    fn test_efficiency_higher_score_more_efficient_at_same_token_count() {
+        let high = make_scored(100, 0.9);
+        let low = make_scored(100, 0.3);
+        assert!(high.efficiency() > low.efficiency());
+    }
+
+    #[test]
+    fn test_efficiency_fewer_tokens_more_efficient_at_same_score() {
+        let small = make_scored(50, 0.5);
+        let large = make_scored(500, 0.5);
+        assert!(small.efficiency() > large.efficiency());
+    }
+
+    // ── Property-based ────────────────────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_budget_standard_l3_never_exceeds_total(total in 1usize..10_000_000) {
+            let b = Budget::standard(total);
+            prop_assert!(b.l3_tokens() <= total, "l3={} > total={total}", b.l3_tokens());
+            prop_assert!(b.l1_tokens() <= total, "l1={} > total={total}", b.l1_tokens());
+            prop_assert!(b.l2_tokens() <= total, "l2={} > total={total}", b.l2_tokens());
+        }
+
+        #[test]
+        fn prop_efficiency_non_negative(tokens in 0usize..100_000, score in 0.0f32..=1.0) {
+            let e = make_scored(tokens, score);
+            prop_assert!(e.efficiency() >= 0.0);
+        }
+    }
+}
+
 /// Statistics about a completed pack operation.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PackStats {

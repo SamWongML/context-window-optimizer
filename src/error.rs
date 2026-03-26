@@ -32,3 +32,74 @@ pub enum OptimError {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_repo_error_message_contains_path() {
+        let err = OptimError::EmptyRepo {
+            path: "/some/repo/path".to_string(),
+        };
+        assert!(
+            err.to_string().contains("/some/repo/path"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_budget_exceeded_message_contains_values() {
+        let err = OptimError::BudgetExceeded {
+            requested: 200,
+            max: 100,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("200"), "missing requested: {msg}");
+        assert!(msg.contains("100"), "missing max: {msg}");
+    }
+
+    #[test]
+    fn test_tokenizer_error_message_contains_detail() {
+        let err = OptimError::Tokenizer("encoding failed".to_string());
+        assert!(
+            err.to_string().contains("encoding failed"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_error_message_contains_detail() {
+        let err = OptimError::Config("bad toml syntax on line 3".to_string());
+        assert!(
+            err.to_string().contains("bad toml syntax on line 3"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_io_error_from_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = OptimError::from(io_err);
+        assert!(matches!(err, OptimError::Io(_)));
+        assert!(err.to_string().contains("i/o error"));
+    }
+
+    #[test]
+    fn test_all_variants_implement_display() {
+        let variants: &[&dyn std::fmt::Display] = &[
+            &OptimError::Tokenizer("t".to_string()),
+            &OptimError::BudgetExceeded {
+                requested: 1,
+                max: 0,
+            },
+            &OptimError::EmptyRepo {
+                path: "p".to_string(),
+            },
+            &OptimError::Config("c".to_string()),
+        ];
+        for v in variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+}

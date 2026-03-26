@@ -91,6 +91,10 @@ harness = false
 name = "knapsack"
 harness = false
 
+[[bench]]
+name = "pipeline"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1
