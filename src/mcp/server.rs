@@ -177,3 +177,184 @@ pub async fn run_stdio_server() -> anyhow::Result<()> {
     tracing::info!("MCP server connection closed");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_temp_repo() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "/// Add two numbers.\npub fn add(a: usize, b: usize) -> usize { a + b }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "fn main() { println!(\"hello\"); }",
+        )
+        .unwrap();
+        dir
+    }
+
+    // ── pack_context ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_pack_context_l1_returns_nonempty_output() {
+        let repo = make_temp_repo();
+        let server = ContextOptimizerServer::new();
+        let input = PackContextInput {
+            repo: repo.path().to_str().unwrap().to_string(),
+            budget: Some(128_000),
+            output: Some("l1".to_string()),
+            focus: None,
+        };
+        let result = server.pack_context(Parameters(input)).await;
+        assert!(result.is_ok(), "pack_context failed: {:?}", result.err());
+        let text = result.unwrap();
+        assert!(!text.is_empty(), "output should not be empty");
+        assert!(text.contains("L1: File Skeleton Map"), "missing L1 header");
+    }
+
+    #[tokio::test]
+    async fn test_pack_context_l3_wraps_in_context_tags() {
+        let repo = make_temp_repo();
+        let server = ContextOptimizerServer::new();
+        let input = PackContextInput {
+            repo: repo.path().to_str().unwrap().to_string(),
+            budget: Some(128_000),
+            output: Some("l3".to_string()),
+            focus: None,
+        };
+        let text = server.pack_context(Parameters(input)).await.unwrap();
+        assert!(text.contains("<context>"), "L3 missing <context>");
+        assert!(text.contains("</context>"), "L3 missing </context>");
+    }
+
+    #[tokio::test]
+    async fn test_pack_context_stats_output_level() {
+        let repo = make_temp_repo();
+        let server = ContextOptimizerServer::new();
+        let input = PackContextInput {
+            repo: repo.path().to_str().unwrap().to_string(),
+            budget: Some(128_000),
+            output: Some("stats".to_string()),
+            focus: None,
+        };
+        let text = server.pack_context(Parameters(input)).await.unwrap();
+        assert!(text.contains("Files scanned"), "stats output missing 'Files scanned'");
+        assert!(text.contains("Tokens used"), "stats output missing 'Tokens used'");
+    }
+
+    #[tokio::test]
+    async fn test_pack_context_all_output_levels_succeed() {
+        let repo = make_temp_repo();
+        let server = ContextOptimizerServer::new();
+        for level in &["l1", "l2", "l3", "stats"] {
+            let input = PackContextInput {
+                repo: repo.path().to_str().unwrap().to_string(),
+                budget: Some(128_000),
+                output: Some(level.to_string()),
+                focus: None,
+            };
+            let result = server.pack_context(Parameters(input)).await;
+            assert!(
+                result.is_ok(),
+                "output level '{level}' failed: {:?}",
+                result.err()
+            );
+            assert!(!result.unwrap().is_empty(), "level '{level}' returned empty output");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pack_context_with_focus_paths() {
+        let repo = make_temp_repo();
+        let lib_path = repo.path().join("lib.rs").to_str().unwrap().to_string();
+        let server = ContextOptimizerServer::new();
+        let input = PackContextInput {
+            repo: repo.path().to_str().unwrap().to_string(),
+            budget: Some(128_000),
+            output: Some("l1".to_string()),
+            focus: Some(vec![lib_path]),
+        };
+        let result = server.pack_context(Parameters(input)).await;
+        assert!(result.is_ok(), "focus paths caused failure: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_pack_context_default_output_level_is_l3() {
+        let repo = make_temp_repo();
+        let server = ContextOptimizerServer::new();
+        let input = PackContextInput {
+            repo: repo.path().to_str().unwrap().to_string(),
+            budget: Some(128_000),
+            output: None, // no output level specified → defaults to l3
+            focus: None,
+        };
+        let text = server.pack_context(Parameters(input)).await.unwrap();
+        assert!(text.contains("<context>"), "default output should be L3 with <context>");
+    }
+
+    #[tokio::test]
+    async fn test_pack_context_invalid_repo_returns_err() {
+        let server = ContextOptimizerServer::new();
+        let input = PackContextInput {
+            repo: "/nonexistent/path/repo_xyz_123".to_string(),
+            budget: Some(128_000),
+            output: None,
+            focus: None,
+        };
+        let result = server.pack_context(Parameters(input)).await;
+        assert!(result.is_err(), "expected error for nonexistent repo");
+    }
+
+    // ── index_stats ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_index_stats_returns_file_and_token_counts() {
+        let repo = make_temp_repo();
+        let server = ContextOptimizerServer::new();
+        let input = IndexStatsInput {
+            repo: repo.path().to_str().unwrap().to_string(),
+        };
+        let text = server.index_stats(Parameters(input)).await.unwrap();
+        assert!(text.contains("Files:"), "missing Files: in output: {text}");
+        assert!(text.contains("Total tokens:"), "missing Total tokens: in output: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_index_stats_includes_language_breakdown() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("utils.py"), "def util(): pass").unwrap();
+
+        let server = ContextOptimizerServer::new();
+        let input = IndexStatsInput {
+            repo: dir.path().to_str().unwrap().to_string(),
+        };
+        let text = server.index_stats(Parameters(input)).await.unwrap();
+        assert!(text.contains("By language:"), "missing language breakdown: {text}");
+        assert!(text.contains("Rust"), "expected Rust in breakdown: {text}");
+        assert!(text.contains("Python"), "expected Python in breakdown: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_index_stats_invalid_repo_returns_err() {
+        let server = ContextOptimizerServer::new();
+        let input = IndexStatsInput {
+            repo: "/nonexistent/path/repo_xyz_456".to_string(),
+        };
+        let result = server.index_stats(Parameters(input)).await;
+        assert!(result.is_err(), "expected error for nonexistent repo");
+    }
+
+    // ── server construction ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_server_new_and_default_are_constructable() {
+        let _s1 = ContextOptimizerServer::new();
+        let _s2 = ContextOptimizerServer::default();
+    }
+}

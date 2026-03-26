@@ -317,4 +317,144 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].path.extension().unwrap() == "rs");
     }
+
+    #[test]
+    fn test_discover_extension_filter_only_includes_matching() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(tmp.path().join("script.py"), "def main(): pass").unwrap();
+        std::fs::write(tmp.path().join("app.go"), "package main").unwrap();
+
+        let opts = DiscoveryOptions {
+            include_extensions: vec!["rs".to_string()],
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+
+        assert_eq!(entries.len(), 1, "only .rs should be included");
+        assert_eq!(
+            entries[0].path.extension().and_then(|e| e.to_str()),
+            Some("rs")
+        );
+    }
+
+    #[test]
+    fn test_discover_extension_filter_multiple_extensions() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(tmp.path().join("script.py"), "def main(): pass").unwrap();
+        std::fs::write(tmp.path().join("README.md"), "# readme").unwrap();
+
+        let opts = DiscoveryOptions {
+            include_extensions: vec!["rs".to_string(), "py".to_string()],
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+
+        assert_eq!(entries.len(), 2, "rs and py should be included");
+        let exts: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e.path.extension()?.to_str())
+            .collect();
+        assert!(exts.contains(&"rs"));
+        assert!(exts.contains(&"py"));
+    }
+
+    #[test]
+    fn test_discover_max_token_filter_excludes_large_files() {
+        let tmp = TempDir::new().unwrap();
+        // Generate a file with many tokens (lots of distinct words)
+        let big: String = (0..500).map(|i| format!("word{i} ")).collect();
+        std::fs::write(tmp.path().join("big.rs"), &big).unwrap();
+        std::fs::write(tmp.path().join("small.rs"), "fn x() {}").unwrap();
+
+        let opts = DiscoveryOptions {
+            max_file_tokens: 10,
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+
+        assert_eq!(entries.len(), 1, "only small.rs should pass the token filter");
+        assert_eq!(
+            entries[0].path.file_name().and_then(|n| n.to_str()),
+            Some("small.rs")
+        );
+    }
+
+    #[test]
+    fn test_discover_language_detected_correctly() {
+        use crate::types::Language;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), "pub fn lib() {}").unwrap();
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].metadata.language,
+            Some(Language::Rust),
+            "expected Rust language detection"
+        );
+    }
+
+    #[test]
+    fn test_discover_multiple_languages_detected() {
+        use crate::types::Language;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(tmp.path().join("utils.py"), "def util(): pass").unwrap();
+        std::fs::write(tmp.path().join("README.md"), "# readme").unwrap();
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let rs = entries.iter().find(|e| {
+            e.path
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x == "rs")
+        });
+        let py = entries.iter().find(|e| {
+            e.path
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x == "py")
+        });
+        let md = entries.iter().find(|e| {
+            e.path
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x == "md")
+        });
+
+        assert_eq!(rs.unwrap().metadata.language, Some(Language::Rust));
+        assert_eq!(py.unwrap().metadata.language, Some(Language::Python));
+        assert_eq!(md.unwrap().metadata.language, None); // .md has no Language variant
+    }
+
+    #[test]
+    fn test_discover_metadata_fields_populated() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("code.rs"), "fn hello() { let x = 1; }").unwrap();
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+
+        assert!(e.token_count > 0, "token_count should be non-zero");
+        assert!(e.metadata.size_bytes > 0, "size_bytes should be non-zero");
+        assert_ne!(e.hash, [0u8; 16], "hash should not be all-zero");
+    }
+
+    #[test]
+    fn test_discover_returns_absolute_paths() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("abs.rs"), "fn f() {}").unwrap();
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].path.is_absolute(),
+            "discovered paths should be absolute"
+        );
+    }
 }

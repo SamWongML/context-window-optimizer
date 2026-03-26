@@ -120,3 +120,175 @@ impl Config {
         Ok(Self::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Write a minimal valid TOML config to a temp dir, optionally with overrides.
+    fn write_config(dir: &TempDir, extra: &str) -> std::path::PathBuf {
+        let content = format!(
+            r#"
+extra_ignore = []
+max_file_bytes = 524288
+max_file_tokens = 8000
+include_extensions = []
+
+[weights]
+recency = 0.5
+size = 0.2
+proximity = 0.3
+
+[dedup]
+exact = true
+near = false
+hamming_threshold = 3
+{extra}
+"#
+        );
+        let path = dir.path().join("ctx-optim.toml");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_default_has_expected_fields() {
+        let cfg = Config::default();
+        assert!(cfg.extra_ignore.contains(&PathBuf::from("target")));
+        assert_eq!(cfg.max_file_bytes, 512 * 1024);
+        assert_eq!(cfg.max_file_tokens, 8_000);
+        assert!(cfg.dedup.exact);
+        assert!(!cfg.dedup.near);
+        assert!(cfg.include_extensions.is_empty());
+    }
+
+    #[test]
+    fn test_load_nonexistent_path_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = Config::load(tmp.path().join("nonexistent.toml")).unwrap();
+        assert_eq!(cfg.max_file_tokens, Config::default().max_file_tokens);
+    }
+
+    #[test]
+    fn test_load_valid_toml_parses_correctly() {
+        let tmp = TempDir::new().unwrap();
+        let content = r#"
+extra_ignore = ["dist"]
+max_file_bytes = 1024
+max_file_tokens = 500
+include_extensions = ["rs", "toml"]
+
+[weights]
+recency = 0.8
+size = 0.1
+proximity = 0.1
+
+[dedup]
+exact = true
+near = false
+hamming_threshold = 3
+"#;
+        let path = tmp.path().join("ctx-optim.toml");
+        std::fs::write(&path, content).unwrap();
+
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.max_file_bytes, 1024);
+        assert_eq!(cfg.max_file_tokens, 500);
+        assert_eq!(cfg.include_extensions, vec!["rs", "toml"]);
+        assert!((cfg.weights.recency - 0.8).abs() < 1e-6);
+        assert!((cfg.weights.size - 0.1).abs() < 1e-6);
+        assert_eq!(cfg.extra_ignore, vec![PathBuf::from("dist")]);
+    }
+
+    #[test]
+    fn test_load_invalid_toml_returns_config_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bad.toml");
+        std::fs::write(&path, "this is ][[ not valid toml!").unwrap();
+
+        let result = Config::load(&path);
+        assert!(
+            matches!(result, Err(OptimError::Config(_))),
+            "expected Config error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_find_and_load_finds_in_same_dir() {
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, "max_file_tokens = 42");
+        // Overwrite with specific token value
+        let content = r#"
+extra_ignore = []
+max_file_bytes = 524288
+max_file_tokens = 42
+include_extensions = []
+
+[weights]
+recency = 0.5
+size = 0.2
+proximity = 0.3
+
+[dedup]
+exact = true
+near = false
+hamming_threshold = 3
+"#;
+        std::fs::write(tmp.path().join("ctx-optim.toml"), content).unwrap();
+
+        let cfg = Config::find_and_load(tmp.path()).unwrap();
+        assert_eq!(cfg.max_file_tokens, 42);
+    }
+
+    #[test]
+    fn test_find_and_load_finds_in_parent_dir() {
+        let tmp = TempDir::new().unwrap();
+        let subdir = tmp.path().join("nested").join("deep");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let content = r#"
+extra_ignore = []
+max_file_bytes = 524288
+max_file_tokens = 999
+include_extensions = []
+
+[weights]
+recency = 0.5
+size = 0.2
+proximity = 0.3
+
+[dedup]
+exact = true
+near = false
+hamming_threshold = 3
+"#;
+        std::fs::write(tmp.path().join("ctx-optim.toml"), content).unwrap();
+
+        let cfg = Config::find_and_load(&subdir).unwrap();
+        assert_eq!(cfg.max_file_tokens, 999, "should have found parent config");
+    }
+
+    #[test]
+    fn test_find_and_load_no_file_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = Config::find_and_load(tmp.path()).unwrap();
+        assert_eq!(cfg.max_file_tokens, Config::default().max_file_tokens);
+    }
+
+    #[test]
+    fn test_scoring_weights_default_all_positive() {
+        let w = ScoringWeights::default();
+        assert!(w.recency > 0.0);
+        assert!(w.size > 0.0);
+        assert!(w.proximity > 0.0);
+    }
+
+    #[test]
+    fn test_dedup_config_default_exact_enabled_near_disabled() {
+        let d = DedupConfig::default();
+        assert!(d.exact);
+        assert!(!d.near);
+        assert_eq!(d.hamming_threshold, 3);
+    }
+}

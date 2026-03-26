@@ -1,4 +1,4 @@
-//! Test fixture helpers — create temporary repositories for integration tests.
+// Test fixture helpers — create temporary repositories for integration tests.
 
 use std::path::Path;
 use tempfile::TempDir;
