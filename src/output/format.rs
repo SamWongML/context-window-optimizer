@@ -333,7 +333,7 @@ mod tests {
             .enumerate()
             .map(|(i, name)| {
                 make_scored(
-                    &tmp.path().join(name).to_string_lossy().to_string(),
+                    tmp.path().join(name).to_string_lossy().as_ref(),
                     10 + i,
                     0.5,
                 )

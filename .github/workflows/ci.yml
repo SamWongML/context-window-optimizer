@@ -22,7 +22,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo install cargo-nextest && cargo nextest run --all-features
+        run: cargo install --locked cargo-nextest && cargo nextest run --all-features
 
       - name: Doc tests
         run: cargo test --doc --all-features

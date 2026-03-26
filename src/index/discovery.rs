@@ -374,7 +374,11 @@ mod tests {
         };
         let entries = discover_files(&opts).unwrap();
 
-        assert_eq!(entries.len(), 1, "only small.rs should pass the token filter");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only small.rs should pass the token filter"
+        );
         assert_eq!(
             entries[0].path.file_name().and_then(|n| n.to_str()),
             Some("small.rs")

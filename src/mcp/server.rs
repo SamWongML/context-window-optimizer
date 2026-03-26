@@ -243,8 +243,14 @@ mod tests {
             focus: None,
         };
         let text = server.pack_context(Parameters(input)).await.unwrap();
-        assert!(text.contains("Files scanned"), "stats output missing 'Files scanned'");
-        assert!(text.contains("Tokens used"), "stats output missing 'Tokens used'");
+        assert!(
+            text.contains("Files scanned"),
+            "stats output missing 'Files scanned'"
+        );
+        assert!(
+            text.contains("Tokens used"),
+            "stats output missing 'Tokens used'"
+        );
     }
 
     #[tokio::test]
@@ -264,7 +270,10 @@ mod tests {
                 "output level '{level}' failed: {:?}",
                 result.err()
             );
-            assert!(!result.unwrap().is_empty(), "level '{level}' returned empty output");
+            assert!(
+                !result.unwrap().is_empty(),
+                "level '{level}' returned empty output"
+            );
         }
     }
 
@@ -280,7 +289,11 @@ mod tests {
             focus: Some(vec![lib_path]),
         };
         let result = server.pack_context(Parameters(input)).await;
-        assert!(result.is_ok(), "focus paths caused failure: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "focus paths caused failure: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
@@ -294,7 +307,10 @@ mod tests {
             focus: None,
         };
         let text = server.pack_context(Parameters(input)).await.unwrap();
-        assert!(text.contains("<context>"), "default output should be L3 with <context>");
+        assert!(
+            text.contains("<context>"),
+            "default output should be L3 with <context>"
+        );
     }
 
     #[tokio::test]
@@ -321,7 +337,10 @@ mod tests {
         };
         let text = server.index_stats(Parameters(input)).await.unwrap();
         assert!(text.contains("Files:"), "missing Files: in output: {text}");
-        assert!(text.contains("Total tokens:"), "missing Total tokens: in output: {text}");
+        assert!(
+            text.contains("Total tokens:"),
+            "missing Total tokens: in output: {text}"
+        );
     }
 
     #[tokio::test]
@@ -335,9 +354,15 @@ mod tests {
             repo: dir.path().to_str().unwrap().to_string(),
         };
         let text = server.index_stats(Parameters(input)).await.unwrap();
-        assert!(text.contains("By language:"), "missing language breakdown: {text}");
+        assert!(
+            text.contains("By language:"),
+            "missing language breakdown: {text}"
+        );
         assert!(text.contains("Rust"), "expected Rust in breakdown: {text}");
-        assert!(text.contains("Python"), "expected Python in breakdown: {text}");
+        assert!(
+            text.contains("Python"),
+            "expected Python in breakdown: {text}"
+        );
     }
 
     #[tokio::test]
