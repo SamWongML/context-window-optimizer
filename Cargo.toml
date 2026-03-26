@@ -23,25 +23,23 @@ serde_json = "1"
 toml = "0.8"                  # Config file parsing
 
 # ── Token Counting ──
-tiktoken = "0.5"              # Pure Rust, 9 encodings, 5 providers, zero-alloc count()
-# Alternative: tiktoken-rs for OpenAI-specific models with chat token math
+tiktoken-rs = "0.9"           # BPE tokenizer — cl100k_base for Claude estimation
 # Alternative: bpe + bpe-openai for 4x speed + interval counting (GitHub's impl)
 
-# ── AST / Code Analysis (Phase 2) ──
-tree-sitter = "0.26"
-tree-sitter-rust = "0.24"
-tree-sitter-typescript = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-go = "0.23"
+# ── AST / Code Analysis (Phase 2, not yet enabled) ──
+# tree-sitter = "0.26"
+# tree-sitter-rust = "0.24"
+# tree-sitter-typescript = "0.23"
+# tree-sitter-python = "0.23"
+# tree-sitter-go = "0.23"
 
 # ── File Discovery & Git ──
 ignore = "0.4"                # .gitignore-aware recursive walk (used by ripgrep)
 git2 = "0.19"                 # libgit2 — recency, blame, change detection
-walkdir = "2"                 # Fallback for non-git dirs
 
 # ── Hashing / Dedup ──
 md-5 = "0.10"                 # Exact-match dedup
-siphasher = "1"               # Fast hashing for SimHash base
+# siphasher reserved for Phase 4 SimHash near-dedup
 
 # ── Error Handling ──
 thiserror = "2"               # Library error types
