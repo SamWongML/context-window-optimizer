@@ -40,6 +40,11 @@ impl DiscoveryOptions {
 
 /// Attempt to read Git metadata (age and commit count) for a file.
 ///
+/// Counts commits that actually **modified** the file (blob OID changed from parent),
+/// not all commits where the file existed. This gives a correct recency signal for
+/// scoring — a file last modified 6 months ago will score lower than one touched
+/// yesterday, even if both are tracked in HEAD.
+///
 /// Returns `None` if the file is not in a git repository or git is unavailable.
 fn read_git_metadata(repo: &git2::Repository, path: &Path) -> Option<GitMetadata> {
     let relative = path
@@ -51,26 +56,50 @@ fn read_git_metadata(repo: &git2::Repository, path: &Path) -> Option<GitMetadata
 
     let mut commit_count = 0u32;
     let mut latest_time: Option<i64> = None;
+    // Cap total commits traversed (not just modifications) to bound latency on large repos.
+    let mut commits_visited = 0u32;
+    const MAX_COMMITS: u32 = 2_000;
+    const MAX_MODIFICATIONS: u32 = 200;
 
     for oid in revwalk.flatten() {
+        commits_visited += 1;
+        if commits_visited > MAX_COMMITS {
+            break;
+        }
+
         let commit = match repo.find_commit(oid) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        // Check if this commit touches our file
         let tree = match commit.tree() {
             Ok(t) => t,
             Err(_) => continue,
         };
 
-        if tree.get_path(relative).is_ok() {
+        let current_oid = tree.get_path(relative).ok().map(|e| e.id());
+
+        // Compare to the first parent's blob OID to detect whether this commit
+        // actually changed the file (rather than just passing it through).
+        let parent_oid = commit
+            .parent(0)
+            .ok()
+            .and_then(|p| p.tree().ok())
+            .and_then(|pt| pt.get_path(relative).ok())
+            .map(|e| e.id());
+
+        let changed = match (current_oid, parent_oid) {
+            (Some(cur), Some(par)) => cur != par, // content changed
+            (Some(_), None) => true,              // file introduced in this commit
+            _ => false,                           // file absent or only in parent (deletion)
+        };
+
+        if changed {
             commit_count += 1;
             if latest_time.is_none() {
                 latest_time = Some(commit.time().seconds());
             }
-            // Cap traversal for performance
-            if commit_count >= 200 {
+            if commit_count >= MAX_MODIFICATIONS {
                 break;
             }
         }
