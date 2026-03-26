@@ -15,7 +15,10 @@ fn test_pack_minimal_repo_succeeds() {
 
     let result = pack_files(repo.path(), &budget, &[], &config).unwrap();
 
-    assert!(result.stats.files_selected > 0, "expected at least one file selected");
+    assert!(
+        result.stats.files_selected > 0,
+        "expected at least one file selected"
+    );
     assert!(result.stats.tokens_used <= budget.total_tokens);
     assert!(!result.l1_output.is_empty());
     assert!(!result.l3_output.is_empty());
@@ -29,8 +32,14 @@ fn test_pack_deduplicates_exact_duplicates() {
 
     let result = pack_files(repo.path(), &budget, &[], &config).unwrap();
 
-    assert_eq!(result.stats.duplicates_removed, 1, "expected 1 duplicate removed");
-    assert!(result.stats.files_selected <= 2, "only 2 unique files should remain");
+    assert_eq!(
+        result.stats.duplicates_removed, 1,
+        "expected 1 duplicate removed"
+    );
+    assert!(
+        result.stats.files_selected <= 2,
+        "only 2 unique files should remain"
+    );
 }
 
 #[test]
@@ -75,8 +84,14 @@ fn test_pack_l3_wraps_in_context_tags() {
 
     let result = pack_files(repo.path(), &budget, &[], &config).unwrap();
 
-    assert!(result.l3_output.contains("<context>"), "L3 should open <context>");
-    assert!(result.l3_output.contains("</context>"), "L3 should close </context>");
+    assert!(
+        result.l3_output.contains("<context>"),
+        "L3 should open <context>"
+    );
+    assert!(
+        result.l3_output.contains("</context>"),
+        "L3 should close </context>"
+    );
 }
 
 #[test]

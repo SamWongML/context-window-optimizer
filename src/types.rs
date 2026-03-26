@@ -226,7 +226,10 @@ mod tests {
     fn test_budget_standard_percentages_sum_to_one() {
         let b = Budget::standard(128_000);
         let sum = b.l1_pct + b.l2_pct + b.l3_pct;
-        assert!((sum - 1.0).abs() < 1e-6, "percentages sum to {sum}, expected 1.0");
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "percentages sum to {sum}, expected 1.0"
+        );
     }
 
     #[test]
@@ -274,7 +277,11 @@ mod tests {
     #[test]
     fn test_efficiency_zero_tokens_returns_zero() {
         let e = make_scored(0, 0.9);
-        assert_eq!(e.efficiency(), 0.0, "zero tokens should yield 0.0 efficiency");
+        assert_eq!(
+            e.efficiency(),
+            0.0,
+            "zero tokens should yield 0.0 efficiency"
+        );
     }
 
     #[test]

@@ -237,7 +237,10 @@ mod tests {
         // Git age (1 day) should dominate over filesystem time (epoch = very old)
         let score = entry_recency_signal(&entry);
         // 1 day old should score close to 1.0 (half-life is 30 days)
-        assert!(score > 0.9, "expected high recency for 1-day-old file, got {score}");
+        assert!(
+            score > 0.9,
+            "expected high recency for 1-day-old file, got {score}"
+        );
     }
 
     #[test]
@@ -257,7 +260,10 @@ mod tests {
         };
         let score = entry_recency_signal(&entry);
         // File just modified → should score close to 1.0
-        assert!(score > 0.95, "recently modified file should score high, got {score}");
+        assert!(
+            score > 0.95,
+            "recently modified file should score high, got {score}"
+        );
     }
 
     // ── Property-based tests ──────────────────────────────────────────────────
