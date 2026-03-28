@@ -611,6 +611,56 @@ impl FeedbackStore {
         }
         Ok(records)
     }
+
+    /// Return the total number of feedback records stored across all sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OptimError::Feedback`] on a database error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ctx_optim::feedback::store::FeedbackStore;
+    ///
+    /// let store = FeedbackStore::open_in_memory().unwrap();
+    /// assert_eq!(store.feedback_record_count().unwrap(), 0);
+    /// ```
+    pub fn feedback_record_count(&self) -> Result<usize, OptimError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM feedback", params![], |row| row.get(0))
+            .map_err(|e| OptimError::Feedback(format!("feedback_record_count: {e}")))?;
+        Ok(count as usize)
+    }
+
+    /// Return the average utilization across all records that have a non-NULL value.
+    ///
+    /// Returns `None` if no records have utilization data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OptimError::Feedback`] on a database error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ctx_optim::feedback::store::FeedbackStore;
+    ///
+    /// let store = FeedbackStore::open_in_memory().unwrap();
+    /// assert!(store.avg_utilization().unwrap().is_none());
+    /// ```
+    pub fn avg_utilization(&self) -> Result<Option<f32>, OptimError> {
+        let result: Option<f64> = self
+            .conn
+            .query_row(
+                "SELECT AVG(utilization) FROM feedback WHERE utilization IS NOT NULL",
+                params![],
+                |row| row.get(0),
+            )
+            .map_err(|e| OptimError::Feedback(format!("avg_utilization: {e}")))?;
+        Ok(result.map(|v| v as f32))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
