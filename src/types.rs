@@ -403,6 +403,9 @@ pub struct PackStats {
 /// The result of a pack operation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PackResult {
+    /// Unique session identifier for feedback tracking.
+    #[serde(default)]
+    pub session_id: String,
     /// Files chosen by the knapsack solver, ranked by composite score.
     pub selected: Vec<ScoredEntry>,
     /// L1 output: one-line skeleton for every file in the repo.

@@ -11,20 +11,92 @@ use std::collections::HashSet;
 
 const KEYWORDS: &[&str] = &[
     // Rust
-    "fn", "let", "mut", "pub", "use", "mod", "struct", "enum", "impl", "trait",
-    "where", "for", "loop", "while", "if", "else", "match", "return", "break",
-    "continue", "self", "super", "crate", "true", "false", "const", "static",
-    "type", "async", "await", "move", "ref", "dyn", "unsafe",
+    "fn",
+    "let",
+    "mut",
+    "pub",
+    "use",
+    "mod",
+    "struct",
+    "enum",
+    "impl",
+    "trait",
+    "where",
+    "for",
+    "loop",
+    "while",
+    "if",
+    "else",
+    "match",
+    "return",
+    "break",
+    "continue",
+    "self",
+    "super",
+    "crate",
+    "true",
+    "false",
+    "const",
+    "static",
+    "type",
+    "async",
+    "await",
+    "move",
+    "ref",
+    "dyn",
+    "unsafe",
     // TypeScript/JavaScript
-    "function", "var", "const", "class", "interface", "export", "import",
-    "from", "extends", "implements", "new", "this", "typeof", "instanceof",
-    "null", "undefined", "void", "never",
+    "function",
+    "var",
+    "const",
+    "class",
+    "interface",
+    "export",
+    "import",
+    "from",
+    "extends",
+    "implements",
+    "new",
+    "this",
+    "typeof",
+    "instanceof",
+    "null",
+    "undefined",
+    "void",
+    "never",
     // Python
-    "def", "class", "import", "from", "None", "True", "False", "lambda",
-    "with", "as", "try", "except", "finally", "raise", "yield", "pass",
+    "def",
+    "class",
+    "import",
+    "from",
+    "None",
+    "True",
+    "False",
+    "lambda",
+    "with",
+    "as",
+    "try",
+    "except",
+    "finally",
+    "raise",
+    "yield",
+    "pass",
     // Go
-    "func", "package", "import", "type", "struct", "interface", "map",
-    "chan", "go", "defer", "select", "case", "default", "range", "nil",
+    "func",
+    "package",
+    "import",
+    "type",
+    "struct",
+    "interface",
+    "map",
+    "chan",
+    "go",
+    "defer",
+    "select",
+    "case",
+    "default",
+    "range",
+    "nil",
 ];
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -56,9 +128,7 @@ pub fn extract_identifiers(source: &str) -> HashSet<String> {
     source
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|tok| {
-            tok.len() >= 3
-                && !KEYWORDS.contains(tok)
-                && !tok.chars().all(|c| c.is_ascii_digit())
+            tok.len() >= 3 && !KEYWORDS.contains(tok) && !tok.chars().all(|c| c.is_ascii_digit())
         })
         .map(|tok| tok.to_string())
         .collect()
@@ -128,8 +198,7 @@ mod tests {
 
     #[test]
     fn test_extract_identifiers_basic() {
-        let code =
-            "fn calculate_score(entry: &FileEntry) -> f32 { entry.token_count as f32 }";
+        let code = "fn calculate_score(entry: &FileEntry) -> f32 { entry.token_count as f32 }";
         let ids = extract_identifiers(code);
         assert!(ids.contains("calculate_score"));
         assert!(ids.contains("FileEntry"));
@@ -193,9 +262,6 @@ mod tests {
         let content = "pub fn score_entry(entry: &FileEntry, weights: &ScoringWeights) -> ScoredEntry { todo!() }";
         let response = "The score_entry function takes a FileEntry and ScoringWeights to produce a ScoredEntry";
         let score = utilization_score(content, response);
-        assert!(
-            (0.0..=1.0).contains(&score),
-            "score out of range: {score}"
-        );
+        assert!((0.0..=1.0).contains(&score), "score out of range: {score}");
     }
 }

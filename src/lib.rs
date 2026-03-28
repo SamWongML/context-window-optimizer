@@ -196,11 +196,53 @@ pub fn pack_files_with_options(
         solver_used: config.selection.solver.clone(),
     };
 
-    Ok(PackResult {
+    // Generate session ID for feedback tracking
+    #[cfg(feature = "feedback")]
+    let session_id = feedback::generate_session_id(&repo.to_string_lossy());
+    #[cfg(not(feature = "feedback"))]
+    let session_id = String::new();
+
+    let result = PackResult {
+        session_id: session_id.clone(),
         selected,
         l1_output,
         l2_output,
         l3_output,
         stats,
-    })
+    };
+
+    // Store session in feedback database if feature is enabled
+    #[cfg(feature = "feedback")]
+    {
+        if let Ok(store) = feedback::store::FeedbackStore::open(
+            std::path::Path::new(&repo).join(&config.feedback.db_path),
+        ) {
+            let session = feedback::store::Session {
+                id: session_id,
+                repo: repo.to_string_lossy().to_string(),
+                budget: budget.total_tokens,
+                created_at: feedback::unix_now(),
+            };
+            if let Err(e) = store.create_session(&session) {
+                tracing::warn!("failed to store feedback session: {e}");
+            }
+
+            let records: Vec<feedback::store::FeedbackRecord> = result
+                .selected
+                .iter()
+                .map(|s| feedback::store::FeedbackRecord {
+                    file_path: s.entry.path.to_string_lossy().to_string(),
+                    token_count: s.entry.token_count,
+                    composite_score: s.composite_score,
+                    was_selected: true,
+                    utilization: None,
+                })
+                .collect();
+            if let Err(e) = store.record_feedback(&session.id, &records) {
+                tracing::warn!("failed to record initial feedback: {e}");
+            }
+        }
+    }
+
+    Ok(result)
 }

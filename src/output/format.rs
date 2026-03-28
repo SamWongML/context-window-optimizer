@@ -386,6 +386,7 @@ mod tests {
     fn test_render_returns_correct_output_per_level() {
         use crate::types::{PackResult, PackStats};
         let result = PackResult {
+            session_id: String::new(),
             selected: vec![],
             l1_output: "L1_DATA".to_string(),
             l2_output: "L2_DATA".to_string(),
