@@ -41,6 +41,14 @@ pub mod scoring;
 pub mod selection;
 pub mod types;
 
+/// Feedback loop: session tracking, utilization scoring, weight learning.
+#[cfg(feature = "feedback")]
+pub mod feedback;
+
+/// File watcher for incremental re-indexing.
+#[cfg(feature = "watch")]
+pub mod watch;
+
 use config::Config;
 use error::OptimError;
 use index::{
