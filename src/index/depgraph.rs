@@ -363,6 +363,7 @@ mod tests {
                     })
                     .collect(),
             }),
+            simhash: None,
         }
     }
 
@@ -378,6 +379,7 @@ mod tests {
                 language: None,
             },
             ast: None,
+            simhash: None,
         }
     }
 

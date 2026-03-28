@@ -256,6 +256,7 @@ mod tests {
                 language: None,
             },
             ast: None,
+            simhash: None,
         };
         // Git age (1 day) should dominate over filesystem time (epoch = very old)
         let score = entry_recency_signal(&entry);
@@ -281,6 +282,7 @@ mod tests {
                 language: None,
             },
             ast: None,
+            simhash: None,
         };
         let score = entry_recency_signal(&entry);
         // File just modified → should score close to 1.0

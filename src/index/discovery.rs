@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     error::OptimError,
-    index::{dedup::md5_hash, tokenizer::Tokenizer},
+    index::{dedup::md5_hash, simhash::simhash_fingerprint, tokenizer::Tokenizer},
     types::{FileEntry, FileMetadata, GitMetadata, Language},
 };
 use ignore::WalkBuilder;
@@ -11,6 +11,16 @@ use std::{
 };
 
 /// Options controlling which files to discover.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ctx_optim::{config::Config, index::discovery::DiscoveryOptions};
+///
+/// let config = Config::default();
+/// let opts = DiscoveryOptions::from_config(&config, ".");
+/// assert!(!opts.compute_simhash); // off by default (near-dedup disabled)
+/// ```
 #[derive(Debug, Clone)]
 pub struct DiscoveryOptions {
     /// Root directory to walk.
@@ -25,6 +35,10 @@ pub struct DiscoveryOptions {
     pub include_extensions: Vec<String>,
     /// Maximum file size for AST parsing (bytes). Files larger skip AST analysis.
     pub max_ast_bytes: usize,
+    /// Whether to compute SimHash fingerprints during discovery (for near-dedup).
+    pub compute_simhash: bool,
+    /// Number of tokens per shingle for SimHash fingerprinting.
+    pub shingle_size: usize,
 }
 
 impl DiscoveryOptions {
@@ -37,6 +51,8 @@ impl DiscoveryOptions {
             max_file_tokens: config.max_file_tokens,
             include_extensions: config.include_extensions.clone(),
             max_ast_bytes: config.max_ast_bytes,
+            compute_simhash: config.dedup.near,
+            shingle_size: config.dedup.shingle_size,
         }
     }
 }
@@ -268,6 +284,13 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         #[cfg(not(feature = "ast"))]
         let ast: Option<crate::types::AstData> = None;
 
+        // SimHash fingerprint for near-duplicate detection
+        let simhash = if opts.compute_simhash {
+            Some(simhash_fingerprint(&content, opts.shingle_size))
+        } else {
+            None
+        };
+
         entries.push(FileEntry {
             path,
             token_count,
@@ -279,6 +302,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 language,
             },
             ast,
+            simhash,
         });
     }
 
@@ -311,6 +335,8 @@ mod tests {
             max_file_tokens: 100_000,
             include_extensions: vec![],
             max_ast_bytes: 256 * 1024,
+            compute_simhash: false,
+            shingle_size: 3,
         }
     }
 
@@ -500,6 +526,33 @@ mod tests {
         assert!(
             entries[0].path.is_absolute(),
             "discovered paths should be absolute"
+        );
+    }
+
+    #[test]
+    fn test_discover_populates_simhash_when_enabled() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn main() {}").unwrap();
+        let opts = DiscoveryOptions {
+            compute_simhash: true,
+            shingle_size: 3,
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+        assert!(
+            entries[0].simhash.is_some(),
+            "simhash should be Some when compute_simhash is true"
+        );
+    }
+
+    #[test]
+    fn test_discover_skips_simhash_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn main() {}").unwrap();
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert!(
+            entries[0].simhash.is_none(),
+            "simhash should be None when compute_simhash is false"
         );
     }
 }
