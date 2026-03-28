@@ -35,6 +35,19 @@ pub enum OptimError {
     /// I/O error wrapping std::io.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// SimHash computation failed.
+    #[error("simhash computation failed for {path}: {detail}")]
+    SimHash {
+        /// The file path.
+        path: String,
+        /// Details of the failure.
+        detail: String,
+    },
+
+    /// Selection solver error.
+    #[error("selection solver error: {0}")]
+    Selection(String),
 }
 
 #[cfg(test)]

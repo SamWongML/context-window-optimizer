@@ -378,6 +378,9 @@ pub struct PackStats {
     pub total_files_scanned: usize,
     /// Exact duplicates removed before scoring.
     pub duplicates_removed: usize,
+    /// Near-duplicate files removed by SimHash dedup.
+    #[serde(default)]
+    pub near_duplicates_removed: usize,
     /// Files selected for inclusion.
     pub files_selected: usize,
     /// Tokens used by selected files.
@@ -386,6 +389,9 @@ pub struct PackStats {
     pub tokens_budget: usize,
     /// Compression ratio: `tokens_used / tokens_in_all_files`.
     pub compression_ratio: f32,
+    /// Selection solver used (`"greedy"`, `"kkt"`, or `"auto"`).
+    #[serde(default)]
+    pub solver_used: String,
 }
 
 /// The result of a pack operation.

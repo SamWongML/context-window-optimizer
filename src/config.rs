@@ -42,14 +42,46 @@ pub struct DedupConfig {
     pub near: bool,
     /// Hamming distance threshold for near-dedup (default: 3).
     pub hamming_threshold: u32,
+    /// Number of tokens per shingle for SimHash (default: 3).
+    #[serde(default = "default_shingle_size")]
+    pub shingle_size: usize,
+}
+
+fn default_shingle_size() -> usize {
+    3
 }
 
 impl Default for DedupConfig {
     fn default() -> Self {
         Self {
             exact: true,
-            near: false, // Phase 4 feature
+            near: false,
             hamming_threshold: 3,
+            shingle_size: 3,
+        }
+    }
+}
+
+/// Selection algorithm configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SelectionConfig {
+    /// Solver to use: `"greedy"`, `"kkt"`, or `"auto"` (default).
+    #[serde(default = "default_solver")]
+    pub solver: String,
+    /// Submodular diversity constraint configuration.
+    #[serde(default)]
+    pub diversity: crate::selection::diversity::DiversityConfig,
+}
+
+fn default_solver() -> String {
+    "auto".to_string()
+}
+
+impl Default for SelectionConfig {
+    fn default() -> Self {
+        Self {
+            solver: default_solver(),
+            diversity: crate::selection::diversity::DiversityConfig::default(),
         }
     }
 }
@@ -67,6 +99,9 @@ pub struct Config {
     pub weights: ScoringWeights,
     /// Deduplication settings.
     pub dedup: DedupConfig,
+    /// Selection algorithm settings.
+    #[serde(default)]
+    pub selection: SelectionConfig,
     /// Extensions to include (empty = all non-binary).
     pub include_extensions: Vec<String>,
     /// Maximum file size for tree-sitter AST parsing (bytes).
@@ -92,6 +127,7 @@ impl Default for Config {
             max_file_tokens: 8_000,
             weights: ScoringWeights::default(),
             dedup: DedupConfig::default(),
+            selection: SelectionConfig::default(),
             include_extensions: vec![],
             max_ast_bytes: 256 * 1024,
         }

@@ -40,7 +40,7 @@ git2 = "0.19"                 # libgit2 — recency, blame, change detection
 
 # ── Hashing / Dedup ──
 md-5 = "0.10"                 # Exact-match dedup
-# siphasher reserved for Phase 4 SimHash near-dedup
+siphasher = "1"               # SimHash near-duplicate detection
 
 # ── Error Handling ──
 thiserror = "2"               # Library error types
@@ -102,6 +102,10 @@ harness = false
 
 [[bench]]
 name = "pipeline"
+harness = false
+
+[[bench]]
+name = "simhash"
 harness = false
 
 [profile.release]
