@@ -13,14 +13,22 @@ pub struct ScoringWeights {
     pub size: f32,
     /// Weight for path proximity to focus files.
     pub proximity: f32,
+    /// Weight for import-graph distance to focus files.
+    #[serde(default = "default_dependency_weight")]
+    pub dependency: f32,
+}
+
+fn default_dependency_weight() -> f32 {
+    0.25
 }
 
 impl Default for ScoringWeights {
     fn default() -> Self {
         Self {
-            recency: 0.5,
-            size: 0.2,
-            proximity: 0.3,
+            recency: 0.4,
+            size: 0.15,
+            proximity: 0.2,
+            dependency: 0.25,
         }
     }
 }
@@ -61,6 +69,13 @@ pub struct Config {
     pub dedup: DedupConfig,
     /// Extensions to include (empty = all non-binary).
     pub include_extensions: Vec<String>,
+    /// Maximum file size for tree-sitter AST parsing (bytes).
+    #[serde(default = "default_max_ast_bytes")]
+    pub max_ast_bytes: usize,
+}
+
+fn default_max_ast_bytes() -> usize {
+    256 * 1024 // 256 KB
 }
 
 impl Default for Config {
@@ -78,6 +93,7 @@ impl Default for Config {
             weights: ScoringWeights::default(),
             dedup: DedupConfig::default(),
             include_extensions: vec![],
+            max_ast_bytes: 256 * 1024,
         }
     }
 }

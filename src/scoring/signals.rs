@@ -93,6 +93,28 @@ pub fn proximity_signal(candidate: &Path, focus_paths: &[std::path::PathBuf]) ->
         .fold(0.0f32, f32::max)
 }
 
+/// Compute the dependency-distance signal, normalized to `[0.0, 1.0]`.
+///
+/// Uses inverse distance: `1.0 / (1.0 + distance)`.
+/// - Focus file itself (distance 0) → 1.0
+/// - Direct import neighbor (distance 1) → 0.5
+/// - Two hops away (distance 2) → 0.33
+/// - Unreachable (`None`) → 0.0
+///
+/// # Examples
+/// ```
+/// use ctx_optim::scoring::signals::dependency_signal;
+/// assert!((dependency_signal(Some(0)) - 1.0).abs() < 1e-6);
+/// assert!((dependency_signal(Some(1)) - 0.5).abs() < 1e-6);
+/// assert_eq!(dependency_signal(None), 0.0);
+/// ```
+pub fn dependency_signal(distance: Option<usize>) -> f32 {
+    match distance {
+        Some(d) => 1.0 / (1.0 + d as f32),
+        None => 0.0,
+    }
+}
+
 fn path_proximity(a: &Path, b: &Path) -> f32 {
     let a_components: Vec<_> = a.components().collect();
     let b_components: Vec<_> = b.components().collect();
@@ -233,6 +255,7 @@ mod tests {
                 }),
                 language: None,
             },
+            ast: None,
         };
         // Git age (1 day) should dominate over filesystem time (epoch = very old)
         let score = entry_recency_signal(&entry);
@@ -257,6 +280,7 @@ mod tests {
                 git: None,                        // no git metadata
                 language: None,
             },
+            ast: None,
         };
         let score = entry_recency_signal(&entry);
         // File just modified → should score close to 1.0
@@ -264,6 +288,30 @@ mod tests {
             score > 0.95,
             "recently modified file should score high, got {score}"
         );
+    }
+
+    #[test]
+    fn test_dependency_signal_self() {
+        assert!((dependency_signal(Some(0)) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dependency_signal_direct() {
+        assert!((dependency_signal(Some(1)) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dependency_signal_unreachable() {
+        assert_eq!(dependency_signal(None), 0.0);
+    }
+
+    #[test]
+    fn test_dependency_signal_monotone() {
+        let d0 = dependency_signal(Some(0));
+        let d1 = dependency_signal(Some(1));
+        let d5 = dependency_signal(Some(5));
+        assert!(d0 > d1);
+        assert!(d1 > d5);
     }
 
     // ── Property-based tests ──────────────────────────────────────────────────
@@ -308,6 +356,15 @@ mod tests {
             prop_assert!(
                 s_small >= s_large,
                 "size_signal({small}) = {s_small} < size_signal({large}) = {s_large}"
+            );
+        }
+
+        #[test]
+        fn prop_dependency_signal_always_in_0_1(d in 0usize..10_000) {
+            let s = dependency_signal(Some(d));
+            prop_assert!(
+                (0.0f32..=1.0).contains(&s),
+                "dependency_signal(Some({d})) = {s} out of [0, 1]"
             );
         }
 

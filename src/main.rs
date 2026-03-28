@@ -6,7 +6,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ctx_optim::{
     config::Config,
     output::format::{OutputLevel, format_stats},
-    pack_files,
+    pack_files_with_options,
     types::Budget,
 };
 
@@ -60,8 +60,12 @@ struct PackArgs {
     #[arg(short, long)]
     focus: Vec<PathBuf>,
 
-    /// Path to a custom config file (default: search upward for ctx-optim.toml).
+    /// Include function/struct/trait signatures in L1 output (requires AST feature).
     #[arg(short, long)]
+    signatures: bool,
+
+    /// Path to a custom config file (default: search upward for ctx-optim.toml).
+    #[arg(short = 'C', long)]
     config: Option<PathBuf>,
 }
 
@@ -109,10 +113,11 @@ async fn cmd_pack(args: PackArgs) -> Result<()> {
 
     let budget = Budget::standard(args.budget);
 
+    let include_signatures = args.signatures;
     let result = tokio::task::spawn_blocking({
         let repo = repo.clone();
         let focus = args.focus.clone();
-        move || pack_files(&repo, &budget, &focus, &config)
+        move || pack_files_with_options(&repo, &budget, &focus, &config, include_signatures)
     })
     .await
     .context("pack task panicked")?

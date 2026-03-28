@@ -22,15 +22,16 @@ use std::fmt::Write as FmtWrite;
 ///             git: None,
 ///             language: None,
 ///         },
+///         ast: None,
 ///     },
 ///     composite_score: 0.85,
 ///     signals: Default::default(),
 /// };
-/// let out = format_l1(&[entry]);
+/// let out = format_l1(&[entry], false);
 /// assert!(out.contains("src/main.rs"));
 /// assert!(out.contains("150"));
 /// ```
-pub fn format_l1(entries: &[ScoredEntry]) -> String {
+pub fn format_l1(entries: &[ScoredEntry], include_signatures: bool) -> String {
     let mut out = String::new();
     writeln!(
         out,
@@ -47,6 +48,13 @@ pub fn format_l1(entries: &[ScoredEntry]) -> String {
             score = e.composite_score,
         )
         .unwrap();
+        if include_signatures {
+            if let Some(ast) = &e.entry.ast {
+                for sig in &ast.signatures {
+                    writeln!(out, "  {kind:?}: {text}", kind = sig.kind, text = sig.text).unwrap();
+                }
+            }
+        }
     }
     out
 }
@@ -225,6 +233,7 @@ mod tests {
                     git: None,
                     language: None,
                 },
+                ast: None,
             },
             composite_score: score,
             signals: ScoreSignals::default(),
@@ -234,7 +243,7 @@ mod tests {
     #[test]
     fn test_format_l1_contains_path_and_tokens() {
         let entries = vec![make_scored("src/main.rs", 100, 0.9)];
-        let out = format_l1(&entries);
+        let out = format_l1(&entries, false);
         assert!(out.contains("src/main.rs"), "missing path: {out}");
         assert!(out.contains("100"), "missing token count: {out}");
         assert!(out.contains("0.900"), "missing score: {out}");
@@ -242,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_format_l1_empty() {
-        let out = format_l1(&[]);
+        let out = format_l1(&[], false);
         assert!(out.contains("0 files"));
     }
 

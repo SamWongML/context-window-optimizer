@@ -56,6 +56,50 @@ pub struct FileMetadata {
     pub language: Option<Language>,
 }
 
+/// Classification of a symbol extracted from AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolKind {
+    Function,
+    Method,
+    Struct,
+    Enum,
+    Trait,
+    Interface,
+    Class,
+    TypeAlias,
+    Impl,
+}
+
+/// A function/type signature extracted from AST via tree-sitter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Signature {
+    /// The kind of symbol.
+    pub kind: SymbolKind,
+    /// The extracted signature text (without body).
+    pub text: String,
+    /// Line number in the source file (1-indexed).
+    pub line: usize,
+}
+
+/// An import/dependency reference extracted from AST.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImportRef {
+    /// The raw import path string (e.g., `crate::scoring::signals`, `./utils`).
+    pub raw_path: String,
+    /// Line number in the source file (1-indexed).
+    pub line: usize,
+}
+
+/// AST analysis results for a single file.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AstData {
+    /// Extracted function/type signatures.
+    pub signatures: Vec<Signature>,
+    /// Extracted import references.
+    pub imports: Vec<ImportRef>,
+}
+
 /// A discovered file with its token count and content hash.
 ///
 /// This is the raw unit processed by the scoring and selection pipeline.
@@ -69,6 +113,9 @@ pub struct FileEntry {
     pub hash: [u8; 16],
     /// File metadata.
     pub metadata: FileMetadata,
+    /// AST analysis data, if tree-sitter parsing succeeded.
+    #[serde(default)]
+    pub ast: Option<AstData>,
 }
 
 /// Per-signal score breakdown, all values normalized to `[0.0, 1.0]`.
@@ -80,6 +127,9 @@ pub struct ScoreSignals {
     pub size_score: f32,
     /// Path-based proximity to focus files (1.0 = same dir, 0.0 = root).
     pub proximity: f32,
+    /// Import-graph distance to focus files (1.0 = focus file, 0.0 = unreachable).
+    #[serde(default)]
+    pub dependency: f32,
 }
 
 /// A `FileEntry` augmented with composite and per-signal scores.
@@ -112,6 +162,7 @@ impl ScoredEntry {
     ///             git: None,
     ///             language: None,
     ///         },
+    ///         ast: None,
     ///     },
     ///     composite_score: 0.8,
     ///     signals: ScoreSignals::default(),
@@ -261,6 +312,7 @@ mod tests {
                     git: None,
                     language: None,
                 },
+                ast: None,
             },
             composite_score: score,
             signals: ScoreSignals::default(),

@@ -85,6 +85,20 @@ pub fn pack_files(
     focus_paths: &[PathBuf],
     config: &Config,
 ) -> Result<PackResult, OptimError> {
+    pack_files_with_options(repo, budget, focus_paths, config, false)
+}
+
+/// Like [`pack_files`] but with additional formatting options.
+///
+/// When `include_signatures` is `true`, the L1 output will include extracted
+/// function/struct/trait signatures beneath each file entry (requires the `ast` feature).
+pub fn pack_files_with_options(
+    repo: impl AsRef<Path>,
+    budget: &Budget,
+    focus_paths: &[PathBuf],
+    config: &Config,
+    include_signatures: bool,
+) -> Result<PackResult, OptimError> {
     let repo = repo.as_ref();
     let opts = DiscoveryOptions::from_config(config, repo);
 
@@ -110,8 +124,16 @@ pub fn pack_files(
         files.len()
     );
 
+    // Step 2.5: Build dependency graph from AST imports
+    let dep_graph = if !focus_paths.is_empty() {
+        let graph = index::depgraph::DependencyGraph::build(&files, repo);
+        Some(graph)
+    } else {
+        None
+    };
+
     // Step 3: Score in parallel
-    let scored = score_entries(&files, &config.weights, focus_paths);
+    let scored = score_entries(&files, &config.weights, focus_paths, dep_graph.as_ref());
 
     // Step 4: Greedy knapsack within L3 budget
     let l3_budget = budget.l3_tokens();
@@ -133,7 +155,7 @@ pub fn pack_files(
     );
 
     // Step 5: Format outputs
-    let l1_output = format_l1(&selected);
+    let l1_output = format_l1(&selected, include_signatures);
     let l2_output = format_l2(&selected);
     let l3_output = format_l3(&selected);
 

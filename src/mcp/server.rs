@@ -14,7 +14,7 @@ use crate::{
     config::Config,
     index::discovery::{DiscoveryOptions, discover_files},
     output::format::{OutputLevel, format_stats},
-    pack_files,
+    pack_files_with_options,
     types::Budget,
 };
 
@@ -32,6 +32,10 @@ pub struct PackContextInput {
 
     /// Paths to prioritise — files in these directories get a proximity signal boost.
     pub focus: Option<Vec<String>>,
+
+    /// Include function/struct/trait signatures in L1 output (requires AST feature).
+    #[serde(default)]
+    pub include_signatures: Option<bool>,
 }
 
 /// Input parameters for the `index_stats` MCP tool.
@@ -86,12 +90,14 @@ impl ContextOptimizerServer {
         };
 
         let config = Config::find_and_load(&repo).map_err(|e| format!("config error: {e}"))?;
+        let include_signatures = input.include_signatures.unwrap_or(false);
 
-        let result =
-            tokio::task::spawn_blocking(move || pack_files(&repo, &budget, &focus_paths, &config))
-                .await
-                .map_err(|e| format!("task error: {e}"))?
-                .map_err(|e| format!("pack error: {e}"))?;
+        let result = tokio::task::spawn_blocking(move || {
+            pack_files_with_options(&repo, &budget, &focus_paths, &config, include_signatures)
+        })
+        .await
+        .map_err(|e| format!("task error: {e}"))?
+        .map_err(|e| format!("pack error: {e}"))?;
 
         let text = match output_level {
             OutputLevel::L1 => result.l1_output,
@@ -209,6 +215,7 @@ mod tests {
             budget: Some(128_000),
             output: Some("l1".to_string()),
             focus: None,
+            include_signatures: None,
         };
         let result = server.pack_context(Parameters(input)).await;
         assert!(result.is_ok(), "pack_context failed: {:?}", result.err());
@@ -226,6 +233,7 @@ mod tests {
             budget: Some(128_000),
             output: Some("l3".to_string()),
             focus: None,
+            include_signatures: None,
         };
         let text = server.pack_context(Parameters(input)).await.unwrap();
         assert!(text.contains("<context>"), "L3 missing <context>");
@@ -241,6 +249,7 @@ mod tests {
             budget: Some(128_000),
             output: Some("stats".to_string()),
             focus: None,
+            include_signatures: None,
         };
         let text = server.pack_context(Parameters(input)).await.unwrap();
         assert!(
@@ -263,6 +272,7 @@ mod tests {
                 budget: Some(128_000),
                 output: Some(level.to_string()),
                 focus: None,
+                include_signatures: None,
             };
             let result = server.pack_context(Parameters(input)).await;
             assert!(
@@ -287,6 +297,7 @@ mod tests {
             budget: Some(128_000),
             output: Some("l1".to_string()),
             focus: Some(vec![lib_path]),
+            include_signatures: None,
         };
         let result = server.pack_context(Parameters(input)).await;
         assert!(
@@ -305,6 +316,7 @@ mod tests {
             budget: Some(128_000),
             output: None, // no output level specified → defaults to l3
             focus: None,
+            include_signatures: None,
         };
         let text = server.pack_context(Parameters(input)).await.unwrap();
         assert!(
@@ -321,6 +333,7 @@ mod tests {
             budget: Some(128_000),
             output: None,
             focus: None,
+            include_signatures: None,
         };
         let result = server.pack_context(Parameters(input)).await;
         assert!(result.is_err(), "expected error for nonexistent repo");

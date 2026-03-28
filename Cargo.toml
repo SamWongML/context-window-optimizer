@@ -26,12 +26,13 @@ toml = "0.8"                  # Config file parsing
 tiktoken-rs = "0.9"           # BPE tokenizer — cl100k_base for Claude estimation
 # Alternative: bpe + bpe-openai for 4x speed + interval counting (GitHub's impl)
 
-# ── AST / Code Analysis (Phase 2, not yet enabled) ──
-# tree-sitter = "0.26"
-# tree-sitter-rust = "0.24"
-# tree-sitter-typescript = "0.23"
-# tree-sitter-python = "0.23"
-# tree-sitter-go = "0.23"
+# ── AST / Code Analysis (Phase 2) ──
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-language = { version = "0.1", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.23", optional = true }
 
 # ── File Discovery & Git ──
 ignore = "0.4"                # .gitignore-aware recursive walk (used by ripgrep)
@@ -73,11 +74,19 @@ predicates = "3"              # CLI output assertions
 tokio-test = "0.4"
 
 [features]
-default = ["mcp"]
+default = ["mcp", "ast"]
 mcp = []
+ast = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-language",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-go",
+]
 watch = ["dep:notify"]
 feedback = ["dep:rusqlite"]
-full = ["mcp", "watch", "feedback"]
+full = ["mcp", "ast", "watch", "feedback"]
 
 [[bin]]
 name = "ctx-optim"

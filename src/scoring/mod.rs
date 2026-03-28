@@ -3,10 +3,11 @@ pub mod signals;
 
 use crate::{
     config::ScoringWeights,
+    index::depgraph::DependencyGraph,
     types::{FileEntry, ScoreSignals, ScoredEntry},
 };
 use rayon::prelude::*;
-use signals::{entry_recency_signal, proximity_signal, size_signal};
+use signals::{dependency_signal, entry_recency_signal, proximity_signal, size_signal};
 use std::path::PathBuf;
 
 /// Score a single `FileEntry`, producing a `ScoredEntry`.
@@ -30,28 +31,37 @@ use std::path::PathBuf;
 ///         git: None,
 ///         language: None,
 ///     },
+///     ast: None,
 /// };
-/// let scored = score_entry(&entry, &ScoringWeights::default(), &[]);
+/// let scored = score_entry(&entry, &ScoringWeights::default(), &[], None);
 /// assert!((0.0..=1.0).contains(&scored.composite_score));
 /// ```
 pub fn score_entry(
     entry: &FileEntry,
     weights: &ScoringWeights,
     focus_paths: &[PathBuf],
+    dep_graph: Option<&DependencyGraph>,
 ) -> ScoredEntry {
     let recency = entry_recency_signal(entry);
     let size_score = size_signal(entry.token_count);
     let proximity = proximity_signal(&entry.path, focus_paths);
+    let dependency = dep_graph
+        .map(|g| dependency_signal(g.distance(focus_paths, &entry.path)))
+        .unwrap_or(0.0);
 
     let signals = ScoreSignals {
         recency,
         size_score,
         proximity,
+        dependency,
     };
 
-    let weight_sum = weights.recency + weights.size + weights.proximity;
+    let weight_sum = weights.recency + weights.size + weights.proximity + weights.dependency;
     let composite = if weight_sum > 0.0 {
-        (weights.recency * recency + weights.size * size_score + weights.proximity * proximity)
+        (weights.recency * recency
+            + weights.size * size_score
+            + weights.proximity * proximity
+            + weights.dependency * dependency)
             / weight_sum
     } else {
         0.0
@@ -72,17 +82,18 @@ pub fn score_entry(
 /// ```no_run
 /// use ctx_optim::{config::ScoringWeights, scoring::score_entries, types::*};
 /// let entries: Vec<FileEntry> = vec![];
-/// let scored = score_entries(&entries, &ScoringWeights::default(), &[]);
+/// let scored = score_entries(&entries, &ScoringWeights::default(), &[], None);
 /// assert_eq!(scored.len(), entries.len());
 /// ```
 pub fn score_entries(
     entries: &[FileEntry],
     weights: &ScoringWeights,
     focus_paths: &[PathBuf],
+    dep_graph: Option<&DependencyGraph>,
 ) -> Vec<ScoredEntry> {
     entries
         .par_iter()
-        .map(|e| score_entry(e, weights, focus_paths))
+        .map(|e| score_entry(e, weights, focus_paths, dep_graph))
         .collect()
 }
 
@@ -106,13 +117,14 @@ mod tests {
                 }),
                 language: None,
             },
+            ast: None,
         }
     }
 
     #[test]
     fn test_score_entry_bounded() {
         let entry = make_entry("src/main.rs", 300, 5.0);
-        let scored = score_entry(&entry, &ScoringWeights::default(), &[]);
+        let scored = score_entry(&entry, &ScoringWeights::default(), &[], None);
         assert!((0.0..=1.0).contains(&scored.composite_score));
         assert!((0.0..=1.0).contains(&scored.signals.recency));
         assert!((0.0..=1.0).contains(&scored.signals.size_score));
@@ -127,9 +139,10 @@ mod tests {
             recency: 1.0,
             size: 0.0,
             proximity: 0.0,
+            dependency: 0.0,
         };
-        let s_fresh = score_entry(&fresh, &w, &[]).composite_score;
-        let s_old = score_entry(&old, &w, &[]).composite_score;
+        let s_fresh = score_entry(&fresh, &w, &[], None).composite_score;
+        let s_old = score_entry(&old, &w, &[], None).composite_score;
         assert!(s_fresh > s_old, "fresh={s_fresh} should beat old={s_old}");
     }
 
@@ -141,9 +154,10 @@ mod tests {
             recency: 0.0,
             size: 1.0,
             proximity: 0.0,
+            dependency: 0.0,
         };
-        let s_small = score_entry(&small, &w, &[]).composite_score;
-        let s_large = score_entry(&large, &w, &[]).composite_score;
+        let s_small = score_entry(&small, &w, &[], None).composite_score;
+        let s_large = score_entry(&large, &w, &[], None).composite_score;
         assert!(
             s_small > s_large,
             "small={s_small} should beat large={s_large}"
@@ -155,7 +169,7 @@ mod tests {
         let entries: Vec<FileEntry> = (0..100)
             .map(|i| make_entry(&format!("src/file{i}.rs"), 100 + i, i as f64))
             .collect();
-        let scored = score_entries(&entries, &ScoringWeights::default(), &[]);
+        let scored = score_entries(&entries, &ScoringWeights::default(), &[], None);
         assert_eq!(scored.len(), 100);
         for s in &scored {
             assert!((0.0..=1.0).contains(&s.composite_score));
@@ -169,8 +183,9 @@ mod tests {
             recency: 0.0,
             size: 0.0,
             proximity: 0.0,
+            dependency: 0.0,
         };
-        let scored = score_entry(&entry, &w, &[]);
+        let scored = score_entry(&entry, &w, &[], None);
         assert_eq!(scored.composite_score, 0.0);
     }
 }

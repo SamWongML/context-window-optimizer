@@ -23,6 +23,8 @@ pub struct DiscoveryOptions {
     pub max_file_tokens: usize,
     /// If non-empty, only files with these extensions are included.
     pub include_extensions: Vec<String>,
+    /// Maximum file size for AST parsing (bytes). Files larger skip AST analysis.
+    pub max_ast_bytes: usize,
 }
 
 impl DiscoveryOptions {
@@ -34,6 +36,7 @@ impl DiscoveryOptions {
             max_file_bytes: config.max_file_bytes,
             max_file_tokens: config.max_file_tokens,
             include_extensions: config.include_extensions.clone(),
+            max_ast_bytes: config.max_ast_bytes,
         }
     }
 }
@@ -258,6 +261,13 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         // Git metadata (expensive — only fetch for non-large repos)
         let git = repo.as_ref().and_then(|r| read_git_metadata(r, &path));
 
+        // AST analysis via tree-sitter (if feature enabled and language supported)
+        #[cfg(feature = "ast")]
+        let ast =
+            language.and_then(|lang| super::ast::analyze_file(&content, lang, opts.max_ast_bytes));
+        #[cfg(not(feature = "ast"))]
+        let ast: Option<crate::types::AstData> = None;
+
         entries.push(FileEntry {
             path,
             token_count,
@@ -268,6 +278,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 git,
                 language,
             },
+            ast,
         });
     }
 
@@ -299,6 +310,7 @@ mod tests {
             max_file_bytes: 1024 * 1024,
             max_file_tokens: 100_000,
             include_extensions: vec![],
+            max_ast_bytes: 256 * 1024,
         }
     }
 

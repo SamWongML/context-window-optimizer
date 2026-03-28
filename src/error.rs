@@ -28,6 +28,10 @@ pub enum OptimError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// AST parsing failed for a file.
+    #[error("ast parse error for {path}: {detail}")]
+    AstParse { path: String, detail: String },
+
     /// I/O error wrapping std::io.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

@@ -17,12 +17,14 @@ fn make_scored(i: usize) -> ScoredEntry {
                 git: None,
                 language: None,
             },
+            ast: None,
         },
         composite_score: (i % 100) as f32 / 100.0,
         signals: ScoreSignals {
             recency: (i % 10) as f32 / 10.0,
             size_score: 0.5,
             proximity: 0.0,
+            dependency: 0.0,
         },
     }
 }

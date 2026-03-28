@@ -20,6 +20,7 @@ fn make_entry(i: usize) -> FileEntry {
             }),
             language: Some(ctx_optim::types::Language::Rust),
         },
+        ast: None,
     }
 }
 
@@ -27,7 +28,7 @@ fn bench_score_single(c: &mut Criterion) {
     let entry = make_entry(0);
     let weights = ScoringWeights::default();
     c.bench_function("score_single_entry", |b| {
-        b.iter(|| score_entry(black_box(&entry), &weights, &[]))
+        b.iter(|| score_entry(black_box(&entry), &weights, &[], None))
     });
 }
 
@@ -38,7 +39,7 @@ fn bench_score_batch(c: &mut Criterion) {
     for n in [100, 1_000, 10_000] {
         let entries: Vec<FileEntry> = (0..n).map(make_entry).collect();
         group.bench_with_input(BenchmarkId::from_parameter(n), &entries, |b, entries| {
-            b.iter(|| score_entries(black_box(entries), &weights, &[]))
+            b.iter(|| score_entries(black_box(entries), &weights, &[], None))
         });
     }
     group.finish();
