@@ -1,3 +1,5 @@
+use crate::index::simhash::{find_near_duplicates, simhash_fingerprint};
+use crate::types::FileEntry;
 use md5::{Digest, Md5};
 use std::collections::HashSet;
 
@@ -41,6 +43,77 @@ pub fn dedup_by_hash<T>(items: Vec<([u8; 16], T)>) -> (Vec<T>, usize) {
             removed += 1;
         }
     }
+
+    (kept, removed)
+}
+
+/// Deduplicate near-duplicate files using SimHash fingerprinting with LSH.
+///
+/// Computes a 64-bit SimHash fingerprint per file (reading content from disk),
+/// groups near-duplicates by Hamming distance, and keeps only the first
+/// occurrence from each group (by input order).
+///
+/// # Arguments
+///
+/// * `items` — File entries to deduplicate.
+/// * `threshold` — Maximum Hamming distance to consider near-duplicate (default: 3).
+/// * `shingle_size` — Number of tokens per shingle (default: 3).
+///
+/// # Returns
+///
+/// `(kept_items, removed_count)`
+///
+/// # Examples
+///
+/// ```no_run
+/// use ctx_optim::index::dedup::dedup_near_duplicates;
+/// use ctx_optim::types::FileEntry;
+/// // let (kept, removed) = dedup_near_duplicates(entries, 3, 3);
+/// ```
+pub fn dedup_near_duplicates(
+    items: Vec<FileEntry>,
+    threshold: u32,
+    shingle_size: usize,
+) -> (Vec<FileEntry>, usize) {
+    if items.len() < 2 {
+        return (items, 0);
+    }
+
+    // Compute SimHash fingerprints by reading file content
+    let fingerprints: Vec<u64> = items
+        .iter()
+        .map(|entry| {
+            match std::fs::read(&entry.path) {
+                Ok(content) => simhash_fingerprint(&content, shingle_size),
+                Err(err) => {
+                    tracing::warn!(
+                        "dedup: could not read {} for SimHash: {err}",
+                        entry.path.display()
+                    );
+                    // Return a unique fingerprint so it won't match anything
+                    0
+                }
+            }
+        })
+        .collect();
+
+    let groups = find_near_duplicates(&fingerprints, threshold, 4);
+
+    // Build set of indices to remove (keep first from each group)
+    let mut remove_set = HashSet::new();
+    for group in &groups {
+        for &idx in &group[1..] {
+            remove_set.insert(idx);
+        }
+    }
+
+    let removed = remove_set.len();
+    let kept: Vec<FileEntry> = items
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !remove_set.contains(i))
+        .map(|(_, f)| f)
+        .collect();
 
     (kept, removed)
 }

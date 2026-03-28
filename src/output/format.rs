@@ -153,33 +153,51 @@ pub fn format_l3(entries: &[ScoredEntry]) -> String {
 /// let stats = PackStats {
 ///     total_files_scanned: 500,
 ///     duplicates_removed: 10,
+///     near_duplicates_removed: 0,
 ///     files_selected: 25,
 ///     tokens_used: 64_000,
 ///     tokens_budget: 128_000,
 ///     compression_ratio: 0.3,
+///     solver_used: String::new(),
 /// };
 /// let s = format_stats(&stats);
 /// assert!(s.contains("64000"));
 /// ```
 pub fn format_stats(stats: &PackStats) -> String {
-    format!(
+    let mut out = format!(
         "\
 Context Window Optimizer — Pack Stats
 ──────────────────────────────────────
   Files scanned:      {total}
-  Duplicates removed: {dups}
-  Files selected:     {selected}
-  Tokens used:        {used} / {budget} ({pct:.1}%)
-  Compression ratio:  {ratio:.2}x
-",
+  Duplicates removed: {dups}",
         total = stats.total_files_scanned,
         dups = stats.duplicates_removed,
+    );
+
+    if stats.near_duplicates_removed > 0 {
+        out.push_str(&format!(
+            "\n  Near-dupes removed: {}",
+            stats.near_duplicates_removed
+        ));
+    }
+
+    out.push_str(&format!(
+        "\n  Files selected:     {selected}\
+         \n  Tokens used:        {used} / {budget} ({pct:.1}%)\
+         \n  Compression ratio:  {ratio:.2}x",
         selected = stats.files_selected,
         used = stats.tokens_used,
         budget = stats.tokens_budget,
         pct = stats.tokens_used as f32 / stats.tokens_budget.max(1) as f32 * 100.0,
         ratio = stats.compression_ratio,
-    )
+    ));
+
+    if !stats.solver_used.is_empty() {
+        out.push_str(&format!("\n  Solver:             {}", stats.solver_used));
+    }
+
+    out.push('\n');
+    out
 }
 
 /// Format a `PackResult` for a given output level.
@@ -269,10 +287,12 @@ mod tests {
         let stats = PackStats {
             total_files_scanned: 100,
             duplicates_removed: 5,
+            near_duplicates_removed: 0,
             files_selected: 10,
             tokens_used: 32_000,
             tokens_budget: 128_000,
             compression_ratio: 0.5,
+            solver_used: String::new(),
         };
         let s = format_stats(&stats);
         assert!(s.contains("100"));
@@ -384,10 +404,12 @@ mod tests {
         let stats = PackStats {
             total_files_scanned: 10,
             duplicates_removed: 0,
+            near_duplicates_removed: 0,
             files_selected: 5,
             tokens_used: 64_000,
             tokens_budget: 128_000,
             compression_ratio: 2.0,
+            solver_used: String::new(),
         };
         let s = format_stats(&stats);
         // 64000/128000 = 50.0%

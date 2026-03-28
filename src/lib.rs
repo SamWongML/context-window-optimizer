@@ -44,12 +44,12 @@ pub mod types;
 use config::Config;
 use error::OptimError;
 use index::{
-    dedup::dedup_by_hash,
+    dedup::{dedup_by_hash, dedup_near_duplicates},
     discovery::{DiscoveryOptions, discover_files},
 };
 use output::format::{format_l1, format_l2, format_l3};
 use scoring::score_entries;
-use selection::knapsack::greedy_knapsack;
+use selection::knapsack::select_items;
 use std::path::{Path, PathBuf};
 use types::{Budget, PackResult, PackStats};
 
@@ -119,8 +119,19 @@ pub fn pack_files_with_options(
         (files, 0)
     };
 
+    // Step 2b: Near-duplicate dedup (SimHash + Hamming distance)
+    let (files, near_duplicates_removed) = if config.dedup.near {
+        dedup_near_duplicates(
+            files,
+            config.dedup.hamming_threshold,
+            config.dedup.shingle_size,
+        )
+    } else {
+        (files, 0)
+    };
+
     tracing::info!(
-        "pack: {duplicates_removed} duplicates removed, {} files remaining",
+        "pack: {duplicates_removed} exact + {near_duplicates_removed} near duplicates removed, {} files remaining",
         files.len()
     );
 
@@ -135,9 +146,19 @@ pub fn pack_files_with_options(
     // Step 3: Score in parallel
     let scored = score_entries(&files, &config.weights, focus_paths, dep_graph.as_ref());
 
-    // Step 4: Greedy knapsack within L3 budget
+    // Step 4: Select within L3 budget (greedy, KKT, or auto with diversity)
     let l3_budget = budget.l3_tokens();
-    let result = greedy_knapsack(scored, l3_budget);
+    let diversity_config = if config.selection.diversity.enabled {
+        Some(&config.selection.diversity)
+    } else {
+        None
+    };
+    let result = select_items(
+        scored,
+        l3_budget,
+        &config.selection.solver,
+        diversity_config,
+    );
     let selected = result.selected;
 
     let tokens_used = result.tokens_used;
@@ -162,10 +183,12 @@ pub fn pack_files_with_options(
     let stats = PackStats {
         total_files_scanned,
         duplicates_removed,
+        near_duplicates_removed,
         files_selected: selected.len(),
         tokens_used,
         tokens_budget: budget.total_tokens,
         compression_ratio,
+        solver_used: config.selection.solver.clone(),
     };
 
     Ok(PackResult {

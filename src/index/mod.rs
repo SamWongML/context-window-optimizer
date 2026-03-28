@@ -4,6 +4,9 @@ pub mod discovery;
 /// Exact-match (MD5) and near-duplicate (SimHash) deduplication.
 pub mod dedup;
 
+/// SimHash fingerprinting for near-duplicate detection.
+pub mod simhash;
+
 /// Token counting via tiktoken (cl100k_base).
 pub mod tokenizer;
 
