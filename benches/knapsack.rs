@@ -21,6 +21,7 @@ fn make_scored(i: usize) -> ScoredEntry {
                 language: None,
             },
             ast: None,
+            simhash: None,
         },
         composite_score: (i % 100) as f32 / 100.0,
         signals: ScoreSignals {

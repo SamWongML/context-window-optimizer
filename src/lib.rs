@@ -120,12 +120,9 @@ pub fn pack_files_with_options(
     };
 
     // Step 2b: Near-duplicate dedup (SimHash + Hamming distance)
+    // Fingerprints are pre-computed during discovery when config.dedup.near is enabled.
     let (files, near_duplicates_removed) = if config.dedup.near {
-        dedup_near_duplicates(
-            files,
-            config.dedup.hamming_threshold,
-            config.dedup.shingle_size,
-        )
+        dedup_near_duplicates(files, config.dedup.hamming_threshold)
     } else {
         (files, 0)
     };

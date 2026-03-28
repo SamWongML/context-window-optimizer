@@ -116,6 +116,10 @@ pub struct FileEntry {
     /// AST analysis data, if tree-sitter parsing succeeded.
     #[serde(default)]
     pub ast: Option<AstData>,
+    /// 64-bit SimHash fingerprint for near-duplicate detection.
+    /// `None` if near-dedup is disabled or fingerprint was not computed.
+    #[serde(default)]
+    pub simhash: Option<u64>,
 }
 
 /// Per-signal score breakdown, all values normalized to `[0.0, 1.0]`.
@@ -163,6 +167,7 @@ impl ScoredEntry {
     ///             language: None,
     ///         },
     ///         ast: None,
+    ///         simhash: None,
     ///     },
     ///     composite_score: 0.8,
     ///     signals: ScoreSignals::default(),
@@ -313,6 +318,7 @@ mod tests {
                     language: None,
                 },
                 ast: None,
+                simhash: None,
             },
             composite_score: score,
             signals: ScoreSignals::default(),

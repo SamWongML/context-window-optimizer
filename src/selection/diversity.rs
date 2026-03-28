@@ -151,6 +151,7 @@ mod tests {
                     language: None,
                 },
                 ast: None,
+                simhash: None,
             },
             composite_score: score,
             signals: ScoreSignals::default(),

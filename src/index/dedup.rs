@@ -1,4 +1,4 @@
-use crate::index::simhash::{find_near_duplicates, simhash_fingerprint};
+use crate::index::simhash::find_near_duplicates;
 use crate::types::FileEntry;
 use md5::{Digest, Md5};
 use std::collections::HashSet;
@@ -47,17 +47,19 @@ pub fn dedup_by_hash<T>(items: Vec<([u8; 16], T)>) -> (Vec<T>, usize) {
     (kept, removed)
 }
 
-/// Deduplicate near-duplicate files using SimHash fingerprinting with LSH.
+/// Deduplicate near-duplicate files using pre-computed SimHash fingerprints.
 ///
-/// Computes a 64-bit SimHash fingerprint per file (reading content from disk),
-/// groups near-duplicates by Hamming distance, and keeps only the first
-/// occurrence from each group (by input order).
+/// Uses the `simhash` field on each [`FileEntry`] (computed during discovery)
+/// to find groups of near-duplicates via LSH bucketing and Hamming distance
+/// verification. Keeps the first occurrence from each group (by input order).
+///
+/// Files without a pre-computed fingerprint (`simhash == None`) are never
+/// grouped as near-duplicates.
 ///
 /// # Arguments
 ///
-/// * `items` — File entries to deduplicate.
+/// * `items` — File entries to deduplicate (must have `simhash` populated).
 /// * `threshold` — Maximum Hamming distance to consider near-duplicate (default: 3).
-/// * `shingle_size` — Number of tokens per shingle (default: 3).
 ///
 /// # Returns
 ///
@@ -65,35 +67,49 @@ pub fn dedup_by_hash<T>(items: Vec<([u8; 16], T)>) -> (Vec<T>, usize) {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ctx_optim::index::dedup::dedup_near_duplicates;
-/// use ctx_optim::types::FileEntry;
-/// // let (kept, removed) = dedup_near_duplicates(entries, 3, 3);
 /// ```
-pub fn dedup_near_duplicates(
-    items: Vec<FileEntry>,
-    threshold: u32,
-    shingle_size: usize,
-) -> (Vec<FileEntry>, usize) {
+/// use ctx_optim::index::dedup::dedup_near_duplicates;
+/// use ctx_optim::types::{FileEntry, FileMetadata};
+/// use std::path::PathBuf;
+/// use std::time::SystemTime;
+///
+/// let entry = FileEntry {
+///     path: PathBuf::from("a.rs"),
+///     token_count: 10,
+///     hash: [0u8; 16],
+///     metadata: FileMetadata {
+///         size_bytes: 40,
+///         last_modified: SystemTime::now(),
+///         git: None,
+///         language: None,
+///     },
+///     ast: None,
+///     simhash: Some(0xAAAA_BBBB_CCCC_DDDD),
+/// };
+/// let (kept, removed) = dedup_near_duplicates(vec![entry], 3);
+/// assert_eq!(kept.len(), 1);
+/// assert_eq!(removed, 0);
+/// ```
+pub fn dedup_near_duplicates(items: Vec<FileEntry>, threshold: u32) -> (Vec<FileEntry>, usize) {
     if items.len() < 2 {
         return (items, 0);
     }
 
-    // Compute SimHash fingerprints by reading file content
+    // Use pre-computed SimHash fingerprints from discovery.
+    // Files without a fingerprint get a unique sentinel so they never match.
+    // We use a hash of the index to spread sentinel bits across all 64 positions,
+    // ensuring any two sentinels differ by many bits (high Hamming distance).
     let fingerprints: Vec<u64> = items
         .iter()
-        .map(|entry| {
-            match std::fs::read(&entry.path) {
-                Ok(content) => simhash_fingerprint(&content, shingle_size),
-                Err(err) => {
-                    tracing::warn!(
-                        "dedup: could not read {} for SimHash: {err}",
-                        entry.path.display()
-                    );
-                    // Return a unique fingerprint so it won't match anything
-                    0
-                }
-            }
+        .enumerate()
+        .map(|(i, entry)| {
+            entry.simhash.unwrap_or_else(|| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                i.hash(&mut hasher);
+                entry.path.hash(&mut hasher);
+                hasher.finish()
+            })
         })
         .collect();
 
@@ -159,5 +175,61 @@ mod tests {
         let (kept, removed) = dedup_by_hash(items);
         assert!(kept.is_empty());
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_near_dedup_removes_similar_fingerprints() {
+        use crate::types::FileMetadata;
+        use std::time::SystemTime;
+
+        let make_entry = |path: &str, simhash: u64| FileEntry {
+            path: std::path::PathBuf::from(path),
+            token_count: 100,
+            hash: [0u8; 16],
+            metadata: FileMetadata {
+                size_bytes: 400,
+                last_modified: SystemTime::now(),
+                git: None,
+                language: None,
+            },
+            ast: None,
+            simhash: Some(simhash),
+        };
+
+        // Two entries with Hamming distance 1 (threshold 3 → grouped)
+        let items = vec![
+            make_entry("a.rs", 0xAAAA_BBBB_CCCC_DDDD),
+            make_entry("b.rs", 0xAAAA_BBBB_CCCC_DDDE), // 1 bit different
+            make_entry("c.rs", 0x1111_2222_3333_4444), // completely different
+        ];
+        let (kept, removed) = dedup_near_duplicates(items, 3);
+        assert_eq!(removed, 1, "expected 1 near-duplicate removed");
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn test_near_dedup_no_simhash_never_grouped() {
+        use crate::types::FileMetadata;
+        use std::time::SystemTime;
+
+        let make_entry = |path: &str, simhash: Option<u64>| FileEntry {
+            path: std::path::PathBuf::from(path),
+            token_count: 100,
+            hash: [0u8; 16],
+            metadata: FileMetadata {
+                size_bytes: 400,
+                last_modified: SystemTime::now(),
+                git: None,
+                language: None,
+            },
+            ast: None,
+            simhash,
+        };
+
+        // Two entries without simhash should never be grouped
+        let items = vec![make_entry("a.rs", None), make_entry("b.rs", None)];
+        let (kept, removed) = dedup_near_duplicates(items, 3);
+        assert_eq!(removed, 0, "entries without simhash should not be grouped");
+        assert_eq!(kept.len(), 2);
     }
 }

@@ -50,6 +50,91 @@ impl TempRepo {
         Self { dir }
     }
 
+    /// Create a repo with near-duplicate files (very similar content, small differences).
+    pub fn with_near_duplicates() -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        // These files share ~95% identical content — only one variable name differs.
+        // The more shared tokens, the lower the SimHash Hamming distance.
+        let base = r#"
+use std::collections::HashMap;
+
+pub fn process_data(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = input.trim();
+    let parsed: Vec<&str> = trimmed.split(',').collect();
+    let mut result = String::new();
+    for item in &parsed {
+        if !item.is_empty() {
+            result.push_str(item.trim());
+            result.push('\n');
+        }
+    }
+    Ok(result)
+}
+
+pub fn validate(input: &str) -> bool {
+    !input.is_empty() && input.len() < 1000
+}
+
+pub fn count_items(input: &str) -> usize {
+    input.split(',').filter(|s| !s.is_empty()).count()
+}
+"#;
+        let variant = r#"
+use std::collections::HashMap;
+
+pub fn process_data(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = input.trim();
+    let parsed: Vec<&str> = trimmed.split(',').collect();
+    let mut result = String::new();
+    for item in &parsed {
+        if !item.is_empty() {
+            result.push_str(item.trim());
+            result.push('\n');
+        }
+    }
+    Ok(result)
+}
+
+pub fn validate(value: &str) -> bool {
+    !value.is_empty() && value.len() < 1000
+}
+
+pub fn count_items(input: &str) -> usize {
+    input.split(',').filter(|s| !s.is_empty()).count()
+}
+"#;
+
+        write_file(root, "src/processor_a.rs", base);
+        write_file(root, "src/processor_b.rs", variant); // near-duplicate
+        write_file(root, "src/unique.rs", "pub fn unique_function() -> u32 { 42 }");
+
+        Self { dir }
+    }
+
+    /// Create a repo with files spread across multiple directories.
+    pub fn with_directory_structure() -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        // 3 files in src/scoring/
+        write_file(root, "src/scoring/signals.rs", "pub fn recency() -> f32 { 0.9 }");
+        write_file(root, "src/scoring/weights.rs", "pub fn default_weights() -> f32 { 0.5 }");
+        write_file(root, "src/scoring/mod.rs", "pub mod signals;\npub mod weights;");
+
+        // 3 files in src/index/
+        write_file(root, "src/index/discovery.rs", "pub fn discover() -> Vec<String> { vec![] }");
+        write_file(root, "src/index/tokenizer.rs", "pub fn count_tokens() -> usize { 0 }");
+        write_file(root, "src/index/mod.rs", "pub mod discovery;\npub mod tokenizer;");
+
+        // 2 files in tests/
+        write_file(root, "tests/test_scoring.rs", "fn test_score() { assert!(true); }");
+        write_file(root, "tests/test_index.rs", "fn test_index() { assert!(true); }");
+
+        Self { dir }
+    }
+
     /// Root path of this repo.
     pub fn path(&self) -> &Path {
         self.dir.path()

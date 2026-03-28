@@ -21,6 +21,7 @@ fn make_entry(i: usize) -> FileEntry {
             language: Some(ctx_optim::types::Language::Rust),
         },
         ast: None,
+        simhash: None,
     }
 }
 
