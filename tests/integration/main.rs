@@ -2,3 +2,9 @@
 
 mod cli;
 mod pack_pipeline;
+
+#[cfg(feature = "feedback")]
+mod feedback;
+
+#[cfg(feature = "watch")]
+mod watch;
