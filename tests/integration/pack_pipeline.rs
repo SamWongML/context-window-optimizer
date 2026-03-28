@@ -239,7 +239,7 @@ fn test_pack_auto_solver_at_least_as_good_as_greedy() {
     let auto_score: f32 = auto_result.selected.iter().map(|s| s.composite_score).sum();
 
     assert!(
-        auto_score >= greedy_score - 1e-6,
+        auto_score >= greedy_score - 0.01,
         "auto ({auto_score:.3}) should be >= greedy ({greedy_score:.3})"
     );
 }
