@@ -46,6 +46,10 @@ enum Commands {
     /// Submit feedback or manage learned weights.
     #[cfg(feature = "feedback")]
     Feedback(FeedbackArgs),
+
+    /// Start the file watcher for incremental re-indexing.
+    #[cfg(feature = "watch")]
+    Watch(WatchArgs),
 }
 
 /// Arguments for the `pack` command.
@@ -80,6 +84,15 @@ struct PackArgs {
 #[derive(Debug, clap::Args)]
 struct IndexArgs {
     /// Repository root to index.
+    #[arg(short, long, default_value = ".")]
+    repo: PathBuf,
+}
+
+/// Arguments for the `watch` command.
+#[cfg(feature = "watch")]
+#[derive(Debug, clap::Args)]
+struct WatchArgs {
+    /// Repository root to watch.
     #[arg(short, long, default_value = ".")]
     repo: PathBuf,
 }
@@ -150,6 +163,9 @@ async fn main() -> Result<()> {
 
         #[cfg(feature = "feedback")]
         Commands::Feedback(args) => cmd_feedback(args).await,
+
+        #[cfg(feature = "watch")]
+        Commands::Watch(args) => cmd_watch(args).await,
     }
 }
 
@@ -355,4 +371,13 @@ async fn cmd_feedback(args: FeedbackArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(feature = "watch")]
+async fn cmd_watch(args: WatchArgs) -> Result<()> {
+    let repo = args.repo.canonicalize().context("invalid --repo path")?;
+    tokio::task::spawn_blocking(move || ctx_optim::watch::run_watch_loop(&repo))
+        .await
+        .context("watch task panicked")?
+        .context("watch failed")
 }
