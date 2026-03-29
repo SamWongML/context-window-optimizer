@@ -8,6 +8,7 @@ use crate::{
 };
 use rayon::prelude::*;
 use signals::{dependency_signal, entry_recency_signal, proximity_signal, size_signal};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Score a single `FileEntry`, producing a `ScoredEntry`.
@@ -95,6 +96,63 @@ pub fn score_entries(
     entries
         .par_iter()
         .map(|e| score_entry(e, weights, focus_paths, dep_graph))
+        .collect()
+}
+
+/// Score a single `FileEntry` with an optional per-file feedback multiplier.
+///
+/// If the file's path appears in `feedback_multipliers`, its composite score
+/// is multiplied (and clamped to `[0.0, 1.0]`).
+///
+/// # Examples
+///
+/// ```no_run
+/// use ctx_optim::{config::ScoringWeights, scoring::score_entry_with_feedback};
+/// use std::{collections::HashMap, path::PathBuf};
+/// let multipliers: HashMap<PathBuf, f32> = HashMap::new();
+/// ```
+pub fn score_entry_with_feedback(
+    entry: &FileEntry,
+    weights: &ScoringWeights,
+    focus_paths: &[PathBuf],
+    dep_graph: Option<&DependencyGraph>,
+    feedback_multipliers: &HashMap<PathBuf, f32>,
+) -> ScoredEntry {
+    let mut scored = score_entry(entry, weights, focus_paths, dep_graph);
+    if let Some(&multiplier) = feedback_multipliers.get(&entry.path) {
+        scored.composite_score = (scored.composite_score * multiplier).clamp(0.0, 1.0);
+    }
+    scored
+}
+
+/// Score a batch of entries in parallel, with optional feedback multipliers.
+///
+/// If `feedback_multipliers` is empty, delegates to [`score_entries`] with no overhead.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ctx_optim::{config::ScoringWeights, scoring::score_entries_with_feedback, types::FileEntry};
+/// use std::collections::HashMap;
+/// let entries: Vec<FileEntry> = vec![];
+/// let scored = score_entries_with_feedback(&entries, &ScoringWeights::default(), &[], None, &HashMap::new());
+/// assert_eq!(scored.len(), entries.len());
+/// ```
+pub fn score_entries_with_feedback(
+    entries: &[FileEntry],
+    weights: &ScoringWeights,
+    focus_paths: &[PathBuf],
+    dep_graph: Option<&DependencyGraph>,
+    feedback_multipliers: &HashMap<PathBuf, f32>,
+) -> Vec<ScoredEntry> {
+    if feedback_multipliers.is_empty() {
+        return score_entries(entries, weights, focus_paths, dep_graph);
+    }
+    entries
+        .par_iter()
+        .map(|e| {
+            score_entry_with_feedback(e, weights, focus_paths, dep_graph, feedback_multipliers)
+        })
         .collect()
 }
 
@@ -189,5 +247,38 @@ mod tests {
         };
         let scored = score_entry(&entry, &w, &[], None);
         assert_eq!(scored.composite_score, 0.0);
+    }
+
+    #[test]
+    fn test_score_entry_with_feedback_multiplier() {
+        let entry = make_entry("src/hot_file.rs", 200, 5.0);
+        let w = ScoringWeights::default();
+        let scored_normal = score_entry(&entry, &w, &[], None);
+
+        let mut multipliers = std::collections::HashMap::new();
+        multipliers.insert(std::path::PathBuf::from("src/hot_file.rs"), 1.5f32);
+        let scored_boosted = score_entry_with_feedback(&entry, &w, &[], None, &multipliers);
+
+        assert!(
+            scored_boosted.composite_score > scored_normal.composite_score,
+            "feedback multiplier should boost score: {:.3} vs {:.3}",
+            scored_boosted.composite_score,
+            scored_normal.composite_score
+        );
+    }
+
+    #[test]
+    fn test_score_entry_with_empty_feedback() {
+        let entry = make_entry("src/main.rs", 200, 5.0);
+        let w = ScoringWeights::default();
+        let scored_normal = score_entry(&entry, &w, &[], None);
+
+        let multipliers = std::collections::HashMap::new();
+        let scored_with_empty = score_entry_with_feedback(&entry, &w, &[], None, &multipliers);
+
+        assert!(
+            (scored_with_empty.composite_score - scored_normal.composite_score).abs() < 1e-6,
+            "empty feedback should not change score"
+        );
     }
 }

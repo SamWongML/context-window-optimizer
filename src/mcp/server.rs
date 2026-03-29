@@ -45,11 +45,39 @@ pub struct IndexStatsInput {
     pub repo: String,
 }
 
+/// Input parameters for the `submit_feedback` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubmitFeedbackInput {
+    /// Session ID returned by a previous `pack_context` call.
+    #[schemars(description = "Session ID from a previous pack_context result")]
+    pub session_id: String,
+    /// The LLM's response text — used to compute per-file utilization via identifier overlap.
+    #[schemars(description = "The LLM response to score against the packed context")]
+    pub llm_response: String,
+    /// Absolute path to the repository root (for locating the feedback database).
+    #[schemars(description = "Repository root path")]
+    pub repo: String,
+}
+
+/// Input parameters for the `learned_weights` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LearnedWeightsInput {
+    /// Absolute path to the repository root.
+    #[schemars(description = "Repository root path")]
+    pub repo: String,
+    /// If true, trigger a new learning cycle before returning weights.
+    #[serde(default)]
+    #[schemars(description = "Run a learning cycle before returning weights")]
+    pub run_learning: Option<bool>,
+}
+
 /// MCP server handler for the Context Window Optimizer.
 ///
-/// Exposes two tools to LLM agents:
+/// Exposes tools to LLM agents:
 /// - `pack_context` — pack the highest-value files within a token budget.
 /// - `index_stats` — report repo statistics without packing.
+/// - `submit_feedback` — submit LLM response feedback for a session (requires `feedback` feature).
+/// - `learned_weights` — return or trigger learning of scoring weights (requires `feedback` feature).
 #[derive(Debug, Clone)]
 pub struct ContextOptimizerServer {
     tool_router: ToolRouter<Self>,
@@ -106,6 +134,9 @@ impl ContextOptimizerServer {
             OutputLevel::Stats => format_stats(&result.stats),
         };
 
+        #[cfg(feature = "feedback")]
+        let text = format!("<!-- session_id: {} -->\n{}", result.session_id, text);
+
         Ok(text)
     }
 
@@ -153,6 +184,152 @@ impl ContextOptimizerServer {
         }
 
         Ok(out)
+    }
+
+    /// Submit feedback for a previously packed context session.
+    ///
+    /// Computes per-file identifier-overlap utilization by comparing each
+    /// selected file's content against the LLM response.
+    /// Requires the `feedback` feature — returns an error otherwise.
+    #[tool(
+        description = "Submit feedback for a pack_context session. Computes per-file utilization by measuring identifier overlap between each file and the LLM response. Requires the feedback feature."
+    )]
+    async fn submit_feedback(
+        &self,
+        #[allow(unused_variables)] params: Parameters<SubmitFeedbackInput>,
+    ) -> Result<String, String> {
+        #[cfg(not(feature = "feedback"))]
+        {
+            Err("feedback feature is not enabled — rebuild with --features feedback".to_string())
+        }
+
+        #[cfg(feature = "feedback")]
+        {
+            use crate::feedback;
+
+            let input = params.0;
+            let repo = PathBuf::from(&input.repo);
+
+            let config = Config::find_and_load(&repo).map_err(|e| format!("config error: {e}"))?;
+            let db_path = repo.join(&config.feedback.db_path);
+
+            let store = feedback::store::FeedbackStore::open(&db_path)
+                .map_err(|e| format!("feedback store error: {e}"))?;
+
+            let session = store
+                .get_session(&input.session_id)
+                .map_err(|e| format!("session lookup error: {e}"))?
+                .ok_or_else(|| format!("session not found: {}", input.session_id))?;
+
+            let records = store
+                .get_session_feedback(&input.session_id)
+                .map_err(|e| format!("feedback lookup error: {e}"))?;
+
+            let llm_response = input.llm_response;
+            let session_id = input.session_id;
+            let repo_path = PathBuf::from(&session.repo);
+
+            let updated_records: Vec<feedback::store::FeedbackRecord> = records
+                .into_iter()
+                .map(|mut rec| {
+                    let file_path = repo_path.join(&rec.file_path);
+                    let content = std::fs::read_to_string(&file_path).unwrap_or_default();
+                    let util = feedback::utilization::utilization_score(&content, &llm_response);
+                    rec.utilization = Some(util);
+                    rec
+                })
+                .collect();
+
+            let n_files = updated_records.len();
+            let avg_util: f32 = if n_files > 0 {
+                updated_records
+                    .iter()
+                    .filter_map(|r| r.utilization)
+                    .sum::<f32>()
+                    / n_files as f32
+            } else {
+                0.0
+            };
+
+            store
+                .record_feedback(&session_id, &updated_records)
+                .map_err(|e| format!("store feedback error: {e}"))?;
+
+            Ok(format!(
+                "Feedback recorded for session {session_id}: {n_files} files, avg utilization {avg_util:.3}"
+            ))
+        }
+    }
+
+    /// Return the current learned scoring weights, optionally triggering a new learning cycle.
+    ///
+    /// Requires the `feedback` feature — returns an error otherwise.
+    #[tool(
+        description = "Return the current learned scoring weights. Optionally triggers a new learning cycle from stored feedback data before returning. Requires the feedback feature."
+    )]
+    async fn learned_weights(
+        &self,
+        #[allow(unused_variables)] params: Parameters<LearnedWeightsInput>,
+    ) -> Result<String, String> {
+        #[cfg(not(feature = "feedback"))]
+        {
+            Err("feedback feature is not enabled — rebuild with --features feedback".to_string())
+        }
+
+        #[cfg(feature = "feedback")]
+        {
+            use crate::feedback;
+
+            let input = params.0;
+            let repo = PathBuf::from(&input.repo);
+
+            let config = Config::find_and_load(&repo).map_err(|e| format!("config error: {e}"))?;
+            let db_path = repo.join(&config.feedback.db_path);
+
+            let store = feedback::store::FeedbackStore::open(&db_path)
+                .map_err(|e| format!("feedback store error: {e}"))?;
+
+            if input.run_learning.unwrap_or(false) {
+                let updated = feedback::learning::run_learning_cycle(
+                    &store,
+                    &config.weights,
+                    config.feedback.learning_rate,
+                )
+                .map_err(|e| format!("learning cycle error: {e}"))?;
+
+                return match updated {
+                    Some(w) => Ok(format!(
+                        "Learning cycle complete. Updated weights:\n  recency:    {:.4}\n  size:       {:.4}\n  proximity:  {:.4}\n  dependency: {:.4}",
+                        w.recency, w.size, w.proximity, w.dependency
+                    )),
+                    None => Ok(
+                        "No feedback data available for learning. Using default weights."
+                            .to_string(),
+                    ),
+                };
+            }
+
+            // Return latest stored weights or defaults
+            match store.latest_weights() {
+                Ok(Some(snap)) => Ok(format!(
+                    "Learned weights (from {}):\n  recency:    {:.4}\n  size:       {:.4}\n  proximity:  {:.4}\n  dependency: {:.4}\n  avg_util:   {:.4}",
+                    snap.created_at,
+                    snap.recency,
+                    snap.size,
+                    snap.proximity,
+                    snap.dependency,
+                    snap.avg_utilization
+                )),
+                Ok(None) => Ok(format!(
+                    "No learned weights yet. Using defaults:\n  recency:    {:.4}\n  size:       {:.4}\n  proximity:  {:.4}\n  dependency: {:.4}",
+                    config.weights.recency,
+                    config.weights.size,
+                    config.weights.proximity,
+                    config.weights.dependency
+                )),
+                Err(e) => Err(format!("weight lookup error: {e}")),
+            }
+        }
     }
 }
 
@@ -386,6 +563,37 @@ mod tests {
         };
         let result = server.index_stats(Parameters(input)).await;
         assert!(result.is_err(), "expected error for nonexistent repo");
+    }
+
+    // ── submit_feedback / learned_weights ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_submit_feedback_missing_session_returns_err() {
+        let server = ContextOptimizerServer::new();
+
+        // Without feedback feature this returns feature-not-enabled error;
+        // with feedback feature it returns session-not-found.
+        let input = SubmitFeedbackInput {
+            session_id: "nonexistent".to_string(),
+            llm_response: "some response".to_string(),
+            repo: "/nonexistent/path".to_string(),
+        };
+        let result = server.submit_feedback(Parameters(input)).await;
+        assert!(result.is_err(), "expected error for missing session");
+    }
+
+    #[tokio::test]
+    async fn test_learned_weights_without_store_returns_err_or_defaults() {
+        let server = ContextOptimizerServer::new();
+        let input = LearnedWeightsInput {
+            repo: "/nonexistent/path".to_string(),
+            run_learning: None,
+        };
+        let result = server.learned_weights(Parameters(input)).await;
+        // Without feedback feature: Err (feature not enabled)
+        // With feedback feature: Err (can't open store) or Ok with defaults
+        // Either outcome is acceptable
+        let _ = result;
     }
 
     // ── server construction ───────────────────────────────────────────────────

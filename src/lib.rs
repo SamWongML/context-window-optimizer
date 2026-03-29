@@ -41,6 +41,14 @@ pub mod scoring;
 pub mod selection;
 pub mod types;
 
+/// Feedback loop: session tracking, utilization scoring, weight learning.
+#[cfg(feature = "feedback")]
+pub mod feedback;
+
+/// File watcher for incremental re-indexing.
+#[cfg(feature = "watch")]
+pub mod watch;
+
 use config::Config;
 use error::OptimError;
 use index::{
@@ -48,7 +56,7 @@ use index::{
     discovery::{DiscoveryOptions, discover_files},
 };
 use output::format::{format_l1, format_l2, format_l3};
-use scoring::score_entries;
+use scoring::score_entries_with_feedback;
 use selection::knapsack::select_items;
 use std::path::{Path, PathBuf};
 use types::{Budget, PackResult, PackStats};
@@ -140,8 +148,23 @@ pub fn pack_files_with_options(
         None
     };
 
-    // Step 3: Score in parallel
-    let scored = score_entries(&files, &config.weights, focus_paths, dep_graph.as_ref());
+    // Step 3: Score in parallel (with feedback multipliers if available)
+    #[cfg(feature = "feedback")]
+    let (effective_weights, feedback_multipliers) = {
+        let db_path = std::path::Path::new(&repo).join(&config.feedback.db_path);
+        load_feedback_context(&db_path, &config.weights)
+    };
+    #[cfg(not(feature = "feedback"))]
+    let (effective_weights, feedback_multipliers) =
+        { (config.weights.clone(), std::collections::HashMap::new()) };
+
+    let scored = score_entries_with_feedback(
+        &files,
+        &effective_weights,
+        focus_paths,
+        dep_graph.as_ref(),
+        &feedback_multipliers,
+    );
 
     // Step 4: Select within L3 budget (greedy, KKT, or auto with diversity)
     let l3_budget = budget.l3_tokens();
@@ -188,11 +211,111 @@ pub fn pack_files_with_options(
         solver_used: config.selection.solver.clone(),
     };
 
-    Ok(PackResult {
+    // Generate session ID for feedback tracking
+    #[cfg(feature = "feedback")]
+    let session_id = feedback::generate_session_id(&repo.to_string_lossy());
+    #[cfg(not(feature = "feedback"))]
+    let session_id = String::new();
+
+    let result = PackResult {
+        session_id: session_id.clone(),
         selected,
         l1_output,
         l2_output,
         l3_output,
         stats,
-    })
+    };
+
+    // Store session in feedback database if feature is enabled
+    #[cfg(feature = "feedback")]
+    {
+        if let Ok(store) = feedback::store::FeedbackStore::open(
+            std::path::Path::new(&repo).join(&config.feedback.db_path),
+        ) {
+            let session = feedback::store::Session {
+                id: session_id,
+                repo: repo.to_string_lossy().to_string(),
+                budget: budget.total_tokens,
+                created_at: feedback::unix_now(),
+            };
+            if let Err(e) = store.create_session(&session) {
+                tracing::warn!("failed to store feedback session: {e}");
+            }
+
+            let records: Vec<feedback::store::FeedbackRecord> = result
+                .selected
+                .iter()
+                .map(|s| feedback::store::FeedbackRecord {
+                    file_path: s.entry.path.to_string_lossy().to_string(),
+                    token_count: s.entry.token_count,
+                    composite_score: s.composite_score,
+                    was_selected: true,
+                    utilization: None,
+                })
+                .collect();
+            if let Err(e) = store.record_feedback(&session.id, &records) {
+                tracing::warn!("failed to record initial feedback: {e}");
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+#[cfg(feature = "feedback")]
+fn load_feedback_context(
+    db_path: &Path,
+    default_weights: &config::ScoringWeights,
+) -> (
+    config::ScoringWeights,
+    std::collections::HashMap<PathBuf, f32>,
+) {
+    use feedback::store::FeedbackStore;
+
+    let store = match FeedbackStore::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("no feedback store: {e}");
+            return (default_weights.clone(), std::collections::HashMap::new());
+        }
+    };
+
+    // Load learned weights if available
+    let weights = match store.latest_weights() {
+        Ok(Some(snap)) => config::ScoringWeights {
+            recency: snap.recency,
+            size: snap.size,
+            proximity: snap.proximity,
+            dependency: snap.dependency,
+        },
+        _ => default_weights.clone(),
+    };
+
+    // Build per-file feedback multipliers from historical utilization
+    let multipliers = match store.all_feedback_with_utilization() {
+        Ok(records) => {
+            let mut file_utils: std::collections::HashMap<String, Vec<f32>> =
+                std::collections::HashMap::new();
+            for r in &records {
+                if let Some(u) = r.utilization {
+                    file_utils.entry(r.file_path.clone()).or_default().push(u);
+                }
+            }
+            file_utils
+                .into_iter()
+                .map(|(path, utils)| {
+                    let avg: f32 = utils.iter().sum::<f32>() / utils.len() as f32;
+                    // Map utilization 0.0–1.0 to multiplier 0.5–1.5
+                    let multiplier = 0.5 + avg;
+                    (PathBuf::from(path), multiplier)
+                })
+                .collect()
+        }
+        Err(e) => {
+            tracing::debug!("cannot load feedback multipliers: {e}");
+            std::collections::HashMap::new()
+        }
+    };
+
+    (weights, multipliers)
 }

@@ -86,6 +86,44 @@ impl Default for SelectionConfig {
     }
 }
 
+/// Configuration for the feedback / weight-learning subsystem.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackConfig {
+    /// Path to the SQLite database file.
+    /// Relative paths are resolved from the repo root.
+    #[serde(default = "default_feedback_db")]
+    pub db_path: String,
+    /// EMA smoothing factor for weight updates (0.0–1.0).
+    /// Lower values change weights more slowly.
+    #[serde(default = "default_learning_rate")]
+    pub learning_rate: f32,
+    /// Minimum number of feedback sessions before weight learning activates.
+    #[serde(default = "default_min_sessions")]
+    pub min_sessions: usize,
+}
+
+fn default_feedback_db() -> String {
+    ".ctx-optim/feedback.db".to_string()
+}
+
+fn default_learning_rate() -> f32 {
+    0.1
+}
+
+fn default_min_sessions() -> usize {
+    5
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            db_path: default_feedback_db(),
+            learning_rate: default_learning_rate(),
+            min_sessions: default_min_sessions(),
+        }
+    }
+}
+
 /// Top-level configuration loaded from `ctx-optim.toml`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -107,6 +145,9 @@ pub struct Config {
     /// Maximum file size for tree-sitter AST parsing (bytes).
     #[serde(default = "default_max_ast_bytes")]
     pub max_ast_bytes: usize,
+    /// Feedback / weight-learning settings (requires `feedback` feature).
+    #[serde(default)]
+    pub feedback: FeedbackConfig,
 }
 
 fn default_max_ast_bytes() -> usize {
@@ -130,6 +171,7 @@ impl Default for Config {
             selection: SelectionConfig::default(),
             include_extensions: vec![],
             max_ast_bytes: 256 * 1024,
+            feedback: FeedbackConfig::default(),
         }
     }
 }
@@ -342,5 +384,13 @@ hamming_threshold = 3
         assert!(d.exact);
         assert!(!d.near);
         assert_eq!(d.hamming_threshold, 3);
+    }
+
+    #[test]
+    fn test_feedback_config_defaults() {
+        let fc = FeedbackConfig::default();
+        assert_eq!(fc.db_path, ".ctx-optim/feedback.db");
+        assert!((fc.learning_rate - 0.1).abs() < 1e-6);
+        assert_eq!(fc.min_sessions, 5);
     }
 }

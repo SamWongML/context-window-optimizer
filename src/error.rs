@@ -48,6 +48,14 @@ pub enum OptimError {
     /// Selection solver error.
     #[error("selection solver error: {0}")]
     Selection(String),
+
+    /// Feedback subsystem error (storage, learning).
+    #[error("feedback error: {0}")]
+    Feedback(String),
+
+    /// File-watcher error.
+    #[error("watch error: {0}")]
+    Watch(String),
 }
 
 #[cfg(test)]
@@ -100,6 +108,24 @@ mod tests {
         let err = OptimError::from(io_err);
         assert!(matches!(err, OptimError::Io(_)));
         assert!(err.to_string().contains("i/o error"));
+    }
+
+    #[test]
+    fn test_feedback_error_message_contains_detail() {
+        let err = OptimError::Feedback("db locked".to_string());
+        assert!(
+            err.to_string().contains("db locked"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_watch_error_message_contains_detail() {
+        let err = OptimError::Watch("inotify limit reached".to_string());
+        assert!(
+            err.to_string().contains("inotify limit reached"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

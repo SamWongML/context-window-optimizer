@@ -10,6 +10,9 @@ use ctx_optim::{
     types::Budget,
 };
 
+#[cfg(feature = "feedback")]
+use ctx_optim::feedback;
+
 /// Context Window Optimizer — intelligent context selection for LLM agents.
 #[derive(Debug, Parser)]
 #[command(
@@ -39,6 +42,14 @@ enum Commands {
 
     /// Index a repository and report statistics without packing.
     Index(IndexArgs),
+
+    /// Submit feedback or manage learned weights.
+    #[cfg(feature = "feedback")]
+    Feedback(FeedbackArgs),
+
+    /// Start the file watcher for incremental re-indexing.
+    #[cfg(feature = "watch")]
+    Watch(WatchArgs),
 }
 
 /// Arguments for the `pack` command.
@@ -77,6 +88,56 @@ struct IndexArgs {
     repo: PathBuf,
 }
 
+/// Arguments for the `watch` command.
+#[cfg(feature = "watch")]
+#[derive(Debug, clap::Args)]
+struct WatchArgs {
+    /// Repository root to watch.
+    #[arg(short, long, default_value = ".")]
+    repo: PathBuf,
+}
+
+/// Arguments for the `feedback` command group.
+#[cfg(feature = "feedback")]
+#[derive(Debug, clap::Args)]
+struct FeedbackArgs {
+    #[command(subcommand)]
+    action: FeedbackAction,
+}
+
+/// Feedback subcommands.
+#[cfg(feature = "feedback")]
+#[derive(Debug, Subcommand)]
+enum FeedbackAction {
+    /// Submit feedback for a pack session.
+    Submit {
+        /// Session ID from a previous pack_context call.
+        #[arg(short, long)]
+        session: String,
+        /// Path to the file containing the LLM response text.
+        #[arg(short = 'f', long)]
+        response_file: PathBuf,
+        /// Repository root path.
+        #[arg(short, long, default_value = ".")]
+        repo: PathBuf,
+    },
+    /// Show current learned weights.
+    Weights {
+        /// Repository root path.
+        #[arg(short, long, default_value = ".")]
+        repo: PathBuf,
+        /// Run a learning cycle before showing weights.
+        #[arg(short, long)]
+        learn: bool,
+    },
+    /// Show feedback statistics.
+    Stats {
+        /// Repository root path.
+        #[arg(short, long, default_value = ".")]
+        repo: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -99,6 +160,12 @@ async fn main() -> Result<()> {
         Commands::Serve => ctx_optim::mcp::server::run_stdio_server().await,
 
         Commands::Index(args) => cmd_index(args).await,
+
+        #[cfg(feature = "feedback")]
+        Commands::Feedback(args) => cmd_feedback(args).await,
+
+        #[cfg(feature = "watch")]
+        Commands::Watch(args) => cmd_watch(args).await,
     }
 }
 
@@ -161,4 +228,156 @@ async fn cmd_index(args: IndexArgs) -> Result<()> {
     );
     print!("{stats_text}");
     Ok(())
+}
+
+#[cfg(feature = "feedback")]
+async fn cmd_feedback(args: FeedbackArgs) -> Result<()> {
+    match args.action {
+        FeedbackAction::Submit {
+            session,
+            response_file,
+            repo,
+        } => {
+            let repo = repo.canonicalize().context("invalid --repo path")?;
+            let config = Config::find_and_load(&repo).context("loading config")?;
+            let db_path = repo.join(&config.feedback.db_path);
+
+            let store =
+                feedback::store::FeedbackStore::open(&db_path).context("open feedback store")?;
+
+            let _session_data = store
+                .get_session(&session)
+                .context("session lookup")?
+                .ok_or_else(|| anyhow::anyhow!("session not found: {session}"))?;
+
+            let records = store
+                .get_session_feedback(&session)
+                .context("feedback lookup")?;
+
+            let llm_response =
+                std::fs::read_to_string(&response_file).context("reading response file")?;
+
+            let updated_records: Vec<feedback::store::FeedbackRecord> = records
+                .into_iter()
+                .map(|mut rec| {
+                    let file_path = repo.join(&rec.file_path);
+                    let content = std::fs::read_to_string(&file_path).unwrap_or_default();
+                    let util = feedback::utilization::utilization_score(&content, &llm_response);
+                    rec.utilization = Some(util);
+                    rec
+                })
+                .collect();
+
+            let n_files = updated_records.len();
+            let avg_util: f32 = if n_files > 0 {
+                updated_records
+                    .iter()
+                    .filter_map(|r| r.utilization)
+                    .sum::<f32>()
+                    / n_files as f32
+            } else {
+                0.0
+            };
+
+            store
+                .record_feedback(&session, &updated_records)
+                .context("store feedback")?;
+
+            let msg = format!(
+                "Feedback recorded for session {session}: {n_files} files, avg utilization {avg_util:.3}\n"
+            );
+            print!("{msg}");
+        }
+
+        FeedbackAction::Weights { repo, learn } => {
+            let repo = repo.canonicalize().context("invalid --repo path")?;
+            let config = Config::find_and_load(&repo).context("loading config")?;
+            let db_path = repo.join(&config.feedback.db_path);
+
+            let store =
+                feedback::store::FeedbackStore::open(&db_path).context("open feedback store")?;
+
+            if learn {
+                let updated = feedback::learning::run_learning_cycle(
+                    &store,
+                    &config.weights,
+                    config.feedback.learning_rate,
+                )
+                .context("learning cycle")?;
+
+                match updated {
+                    Some(w) => {
+                        let msg = format!(
+                            "Learning cycle complete. Updated weights:\n  recency:    {:.4}\n  size:       {:.4}\n  proximity:  {:.4}\n  dependency: {:.4}\n",
+                            w.recency, w.size, w.proximity, w.dependency
+                        );
+                        print!("{msg}");
+                    }
+                    None => {
+                        let msg =
+                            "No feedback data available for learning. Using default weights.\n";
+                        print!("{msg}");
+                    }
+                }
+            } else {
+                match store.latest_weights().context("weight lookup")? {
+                    Some(snap) => {
+                        let msg = format!(
+                            "Learned weights (snapshot at {}):\n  recency:    {:.4}\n  size:       {:.4}\n  proximity:  {:.4}\n  dependency: {:.4}\n  avg_util:   {:.4}\n",
+                            snap.created_at,
+                            snap.recency,
+                            snap.size,
+                            snap.proximity,
+                            snap.dependency,
+                            snap.avg_utilization
+                        );
+                        print!("{msg}");
+                    }
+                    None => {
+                        let msg = format!(
+                            "No learned weights yet. Using defaults:\n  recency:    {:.4}\n  size:       {:.4}\n  proximity:  {:.4}\n  dependency: {:.4}\n",
+                            config.weights.recency,
+                            config.weights.size,
+                            config.weights.proximity,
+                            config.weights.dependency
+                        );
+                        print!("{msg}");
+                    }
+                }
+            }
+        }
+
+        FeedbackAction::Stats { repo } => {
+            let repo = repo.canonicalize().context("invalid --repo path")?;
+            let config = Config::find_and_load(&repo).context("loading config")?;
+            let db_path = repo.join(&config.feedback.db_path);
+
+            let store =
+                feedback::store::FeedbackStore::open(&db_path).context("open feedback store")?;
+
+            let session_count = store.session_count().context("session count")?;
+            let record_count = store.feedback_record_count().context("record count")?;
+            let avg_util = store.avg_utilization().context("avg utilization")?;
+
+            let util_line = match avg_util {
+                Some(u) => format!("  Avg utilization:  {u:.4}\n"),
+                None => "  Avg utilization:  (no data)\n".to_string(),
+            };
+            let msg = format!(
+                "Feedback Statistics:\n  Sessions:         {session_count}\n  Feedback records: {record_count}\n{util_line}"
+            );
+            print!("{msg}");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "watch")]
+async fn cmd_watch(args: WatchArgs) -> Result<()> {
+    let repo = args.repo.canonicalize().context("invalid --repo path")?;
+    tokio::task::spawn_blocking(move || ctx_optim::watch::run_watch_loop(&repo))
+        .await
+        .context("watch task panicked")?
+        .context("watch failed")
 }
