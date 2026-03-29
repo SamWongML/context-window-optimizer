@@ -1,10 +1,16 @@
 use crate::types::{PackResult, PackStats, ScoredEntry};
 use std::fmt::Write as FmtWrite;
 
-/// Format the L1 skeleton output: one line per selected file showing path and token count.
+/// Rough token estimate for a single L1 skeleton line (path + metadata).
+/// Used to budget how many entries we can fit in the L1 output.
+const TOKENS_PER_L1_LINE: usize = 12;
+
+/// Format the L1 skeleton output: one line per file showing path and token count.
 ///
-/// This is the lightest output layer — 5% of the total token budget. It gives the
-/// LLM agent a complete map of what's available without the content.
+/// Receives ALL scored repo files (not just the knapsack-selected subset) so it
+/// provides a complete map of the repository for the LLM agent.  Entries must be
+/// pre-sorted by descending composite score; the function truncates at
+/// `max_tokens` so the output stays within the L1 budget (typically 5% of total).
 ///
 /// # Examples
 /// ```
@@ -28,21 +34,38 @@ use std::fmt::Write as FmtWrite;
 ///     composite_score: 0.85,
 ///     signals: Default::default(),
 /// };
-/// let out = format_l1(&[entry], false);
+/// let out = format_l1(&[entry], false, 10_000);
 /// assert!(out.contains("src/main.rs"));
 /// assert!(out.contains("150"));
 /// ```
-pub fn format_l1(entries: &[ScoredEntry], include_signatures: bool) -> String {
+pub fn format_l1(entries: &[ScoredEntry], include_signatures: bool, max_tokens: usize) -> String {
     let mut out = String::new();
-    writeln!(
-        out,
-        "<!-- L1: File Skeleton Map ({} files) -->",
-        entries.len()
-    )
-    .unwrap();
+    let mut tokens_estimated = 0usize;
+
+    // We don't know the final count upfront (truncation), so write the header
+    // last and prepend it.
+    let mut body = String::new();
+    let mut included = 0usize;
+
     for e in entries {
+        // Each signature line adds roughly the same cost as a file line.
+        let sig_count = if include_signatures {
+            e.entry
+                .ast
+                .as_ref()
+                .map(|a| a.signatures.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let line_tokens = TOKENS_PER_L1_LINE * (1 + sig_count);
+
+        if tokens_estimated + line_tokens > max_tokens && included > 0 {
+            break;
+        }
+
         writeln!(
-            out,
+            body,
             "{path}  [{tokens} tokens, score={score:.3}]",
             path = e.entry.path.display(),
             tokens = e.entry.token_count,
@@ -52,11 +75,27 @@ pub fn format_l1(entries: &[ScoredEntry], include_signatures: bool) -> String {
         if include_signatures {
             if let Some(ast) = &e.entry.ast {
                 for sig in &ast.signatures {
-                    writeln!(out, "  {kind:?}: {text}", kind = sig.kind, text = sig.text).unwrap();
+                    writeln!(body, "  {kind:?}: {text}", kind = sig.kind, text = sig.text).unwrap();
                 }
             }
         }
+
+        tokens_estimated += line_tokens;
+        included += 1;
     }
+
+    let total = entries.len();
+    let truncated = total > included;
+    if truncated {
+        writeln!(
+            out,
+            "<!-- L1: File Skeleton Map ({included}/{total} files, truncated to {max_tokens} tokens) -->"
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "<!-- L1: File Skeleton Map ({total} files) -->").unwrap();
+    }
+    out.push_str(&body);
     out
 }
 
@@ -263,7 +302,7 @@ mod tests {
     #[test]
     fn test_format_l1_contains_path_and_tokens() {
         let entries = vec![make_scored("src/main.rs", 100, 0.9)];
-        let out = format_l1(&entries, false);
+        let out = format_l1(&entries, false, 10_000);
         assert!(out.contains("src/main.rs"), "missing path: {out}");
         assert!(out.contains("100"), "missing token count: {out}");
         assert!(out.contains("0.900"), "missing score: {out}");
@@ -271,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_format_l1_empty() {
-        let out = format_l1(&[], false);
+        let out = format_l1(&[], false, 10_000);
         assert!(out.contains("0 files"));
     }
 
@@ -417,5 +456,56 @@ mod tests {
         let s = format_stats(&stats);
         // 64000/128000 = 50.0%
         assert!(s.contains("50.0%"), "expected 50.0% in: {s}");
+    }
+
+    // ── format_l1 truncation ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_l1_truncates_at_max_tokens() {
+        // Create 20 entries.  With TOKENS_PER_L1_LINE=12, a budget of 60 tokens
+        // should fit exactly 5 entries (5 × 12 = 60).
+        let entries: Vec<ScoredEntry> = (0..20)
+            .map(|i| make_scored(&format!("src/file{i}.rs"), 100, 0.9 - i as f32 * 0.01))
+            .collect();
+        let max_tokens = 5 * TOKENS_PER_L1_LINE;
+        let out = format_l1(&entries, false, max_tokens);
+
+        // Count file lines (lines that contain ".rs")
+        let file_lines = out.lines().filter(|l| l.contains(".rs")).count();
+        assert_eq!(
+            file_lines, 5,
+            "expected 5 entries at budget={max_tokens}, got {file_lines}\n{out}"
+        );
+        assert!(
+            out.contains("truncated"),
+            "truncated header expected when not all entries fit: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_l1_no_truncation_when_budget_large() {
+        let entries: Vec<ScoredEntry> = (0..5)
+            .map(|i| make_scored(&format!("src/f{i}.rs"), 50, 0.5))
+            .collect();
+        let out = format_l1(&entries, false, 100_000);
+
+        let file_lines = out.lines().filter(|l| l.contains(".rs")).count();
+        assert_eq!(file_lines, 5, "all 5 entries should appear: {out}");
+        assert!(
+            !out.contains("truncated"),
+            "no truncation expected at large budget: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_l1_at_least_one_entry_always_included() {
+        // Even with max_tokens=0 the first entry must always be emitted so the
+        // caller receives something useful.
+        let entries = vec![make_scored("src/only.rs", 200, 1.0)];
+        let out = format_l1(&entries, false, 0);
+        assert!(
+            out.contains("src/only.rs"),
+            "first entry must always appear: {out}"
+        );
     }
 }

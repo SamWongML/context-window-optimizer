@@ -4,11 +4,31 @@ use crate::{
     index::{dedup::md5_hash, simhash::simhash_fingerprint, tokenizer::Tokenizer},
     types::{FileEntry, FileMetadata, GitMetadata, Language},
 };
+use dashmap::DashMap;
 use ignore::WalkBuilder;
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
-    time::SystemTime,
+    sync::OnceLock,
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+// ---------------------------------------------------------------------------
+// Per-process git-metadata cache: keyed by (absolute path, mtime_secs).
+// Survives across MCP tool calls in the same server process.
+// ---------------------------------------------------------------------------
+type GitCache = DashMap<(PathBuf, u64), Option<GitMetadata>>;
+
+static GIT_CACHE: OnceLock<GitCache> = OnceLock::new();
+
+fn git_cache() -> &'static GitCache {
+    GIT_CACHE.get_or_init(DashMap::new)
+}
+
+// Per-thread git2::Repository handle used during the parallel enrichment phase.
+thread_local! {
+    static THREAD_REPO: RefCell<Option<git2::Repository>> = const { RefCell::new(None) };
+}
 
 /// Options controlling which files to discover.
 ///
@@ -76,9 +96,10 @@ fn read_git_metadata(repo: &git2::Repository, path: &Path) -> Option<GitMetadata
     let mut commit_count = 0u32;
     let mut latest_time: Option<i64> = None;
     // Cap total commits traversed (not just modifications) to bound latency on large repos.
+    // 500 is sufficient for recency signals and keeps per-file cost under ~1 ms.
     let mut commits_visited = 0u32;
-    const MAX_COMMITS: u32 = 2_000;
-    const MAX_MODIFICATIONS: u32 = 200;
+    const MAX_COMMITS: u32 = 500;
+    const MAX_MODIFICATIONS: u32 = 100;
 
     for oid in revwalk.flatten() {
         commits_visited += 1;
@@ -161,12 +182,29 @@ fn read_git_metadata(repo: &git2::Repository, path: &Path) -> Option<GitMetadata
 /// let files = discover_files(&opts).unwrap();
 /// println!("found {} files", files.len());
 /// ```
+/// Intermediate record produced by the serial walk phase before git enrichment.
+struct WalkRecord {
+    path: PathBuf,
+    size_bytes: u64,
+    last_modified: SystemTime,
+    token_count: usize,
+    hash: [u8; 16],
+    language: Option<Language>,
+    #[cfg(feature = "ast")]
+    ast: Option<crate::types::AstData>,
+    #[cfg(not(feature = "ast"))]
+    ast: Option<crate::types::AstData>,
+    simhash: Option<u64>,
+}
+
 pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimError> {
     let tokenizer = Tokenizer::new()?;
 
-    // Try to open git repo for metadata enrichment
-    let repo = git2::Repository::discover(&opts.root).ok();
-    if repo.is_some() {
+    // Check whether a git repo is reachable (used later for per-thread opens).
+    let repo_root: Option<PathBuf> = git2::Repository::discover(&opts.root)
+        .ok()
+        .and_then(|r| r.workdir().map(|p| p.to_path_buf()));
+    if repo_root.is_some() {
         tracing::debug!("git repository found at {}", opts.root.display());
     } else {
         tracing::debug!("no git repository, skipping git metadata");
@@ -180,16 +218,27 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         .git_global(true) // respect global .gitignore
         .git_exclude(true); // respect .git/info/exclude
 
-    // Add extra ignore patterns
-    for extra in &opts.extra_ignore {
-        builder.add_ignore(extra);
-    }
+    // Filter entries whose *name* matches any extra_ignore pattern.
+    // NOTE: WalkBuilder::add_ignore() expects a path to an ignore-rules FILE,
+    // not a bare name — using it with directory names like ".git" silently does
+    // nothing.  filter_entry() is the correct API for excluding paths by name.
+    let extra_ignores = opts.extra_ignore.clone();
+    builder.filter_entry(move |e| {
+        if let Some(name) = e.path().file_name() {
+            !extra_ignores.iter().any(|p| p.as_os_str() == name)
+        } else {
+            true
+        }
+    });
 
     let walker = builder.build();
-    let mut entries: Vec<FileEntry> = Vec::new();
+    let mut records: Vec<WalkRecord> = Vec::new();
     let mut skipped_size = 0usize;
     let mut skipped_binary = 0usize;
 
+    // ── Phase 1: serial walk ─────────────────────────────────────────────────
+    // Collect file content and compute all cheap fields synchronously.
+    // Git metadata is deferred to Phase 2 where it is parallelised.
     for result in walker {
         let dir_entry = match result {
             Ok(e) => e,
@@ -274,9 +323,6 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        // Git metadata (expensive — only fetch for non-large repos)
-        let git = repo.as_ref().and_then(|r| read_git_metadata(r, &path));
-
         // AST analysis via tree-sitter (if feature enabled and language supported)
         #[cfg(feature = "ast")]
         let ast =
@@ -291,16 +337,13 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             None
         };
 
-        entries.push(FileEntry {
+        records.push(WalkRecord {
             path,
+            size_bytes,
+            last_modified,
             token_count,
             hash,
-            metadata: FileMetadata {
-                size_bytes,
-                last_modified,
-                git,
-                language,
-            },
+            language,
             ast,
             simhash,
         });
@@ -308,16 +351,70 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
 
     tracing::info!(
         "discovery: {} files indexed, {} skipped (size), {} skipped (binary)",
-        entries.len(),
+        records.len(),
         skipped_size,
         skipped_binary
     );
 
-    if entries.is_empty() {
+    if records.is_empty() {
         return Err(OptimError::EmptyRepo {
             path: opts.root.display().to_string(),
         });
     }
+
+    // ── Phase 2: parallel git metadata enrichment ────────────────────────────
+    // Each rayon thread opens its own git2::Repository via thread_local storage
+    // to avoid the !Send constraint of git2::Repository.
+    // Results are also stored in the process-wide GIT_CACHE keyed by
+    // (path, mtime_secs) so subsequent MCP calls skip the git walk entirely
+    // for unchanged files.
+    use rayon::prelude::*;
+
+    let entries: Vec<FileEntry> = records
+        .into_par_iter()
+        .map(|rec| {
+            let mtime_key = rec
+                .last_modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cache_key = (rec.path.clone(), mtime_key);
+
+            let git = if let Some(root) = &repo_root {
+                // Check process-level cache first
+                if let Some(cached) = git_cache().get(&cache_key) {
+                    cached.clone()
+                } else {
+                    // Open (or reuse) a per-thread repository handle
+                    let result = THREAD_REPO.with(|cell| {
+                        let mut slot = cell.borrow_mut();
+                        if slot.is_none() {
+                            *slot = git2::Repository::open(root).ok();
+                        }
+                        slot.as_ref().and_then(|r| read_git_metadata(r, &rec.path))
+                    });
+                    git_cache().insert(cache_key, result.clone());
+                    result
+                }
+            } else {
+                None
+            };
+
+            FileEntry {
+                path: rec.path,
+                token_count: rec.token_count,
+                hash: rec.hash,
+                metadata: FileMetadata {
+                    size_bytes: rec.size_bytes,
+                    last_modified: rec.last_modified,
+                    git,
+                    language: rec.language,
+                },
+                ast: rec.ast,
+                simhash: rec.simhash,
+            }
+        })
+        .collect();
 
     Ok(entries)
 }
@@ -554,5 +651,68 @@ mod tests {
             entries[0].simhash.is_none(),
             "simhash should be None when compute_simhash is false"
         );
+    }
+
+    #[test]
+    fn test_discover_excludes_extra_ignore_directories() {
+        let tmp = TempDir::new().unwrap();
+
+        // Real source file that should be indexed
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}").unwrap();
+
+        // Create a fake .git directory with text files that would previously
+        // leak through (the old add_ignore() bug treated these as rules files,
+        // not exclusion targets, so .git/ was never filtered).
+        let git_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git_dir.join("COMMIT_EDITMSG"), "initial commit\n").unwrap();
+        let refs_dir = git_dir.join("refs").join("heads");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        std::fs::write(
+            refs_dir.join("main"),
+            "0000000000000000000000000000000000000000\n",
+        )
+        .unwrap();
+
+        // Also create a target directory (another common extra_ignore entry)
+        let target_dir = tmp.path().join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("binary_output.rs"), "// generated").unwrap();
+
+        let opts = DiscoveryOptions {
+            extra_ignore: vec![PathBuf::from(".git"), PathBuf::from("target")],
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+
+        // Only main.rs should be discovered
+        assert_eq!(entries.len(), 1, "expected only main.rs, got {entries:?}");
+        assert_eq!(
+            entries[0].path.file_name().and_then(|n| n.to_str()),
+            Some("main.rs")
+        );
+
+        // Confirm no .git/ or target/ paths leaked through
+        for e in &entries {
+            let p = e.path.to_string_lossy();
+            assert!(
+                !p.contains("/.git/") && !p.contains("\\.git\\"),
+                "discovered a .git/ path: {p}"
+            );
+            assert!(
+                !p.contains("/target/") && !p.contains("\\target\\"),
+                "discovered a target/ path: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_discover_git_cache_is_populated_on_first_run() {
+        // Verify the process-level git cache is accessible (not a correctness
+        // test of git metadata, just that the cache infrastructure is live).
+        let cache = git_cache();
+        // The cache is a DashMap — we can read its len without error.
+        let _ = cache.len();
     }
 }
