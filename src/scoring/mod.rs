@@ -281,4 +281,53 @@ mod tests {
             "empty feedback should not change score"
         );
     }
+
+    #[test]
+    fn test_focus_weights_boost_adjacent_file_over_unrelated() {
+        // Both files have the same age so recency is equal.  With focus-boosted
+        // weights the file co-located with the focus should win purely via proximity.
+        let readme = make_entry("README.md", 400, 5.0);
+        let signals = make_entry("src/scoring/signals.rs", 600, 5.0);
+
+        // Focus-boosted weights (as applied in lib.rs when focus_paths is set)
+        let focus_w = ScoringWeights {
+            recency: 0.15,
+            size: 0.05,
+            proximity: 0.45,
+            dependency: 0.35,
+        };
+        let focus_paths = vec![PathBuf::from("src/scoring/mod.rs")];
+
+        let score_readme = score_entry(&readme, &focus_w, &focus_paths, None).composite_score;
+        let score_signals = score_entry(&signals, &focus_w, &focus_paths, None).composite_score;
+
+        assert!(
+            score_signals > score_readme,
+            "adjacent scoring file (score={score_signals:.3}) should beat unrelated README (score={score_readme:.3}) with focus weights"
+        );
+    }
+
+    #[test]
+    fn test_focus_weights_exact_focus_file_ranks_highest() {
+        // The focus file itself should always rank highest among candidates at the
+        // same age, because it gets proximity = 1.0.
+        let focus_file = make_entry("src/scoring/mod.rs", 300, 5.0);
+        let unrelated = make_entry("README.md", 100, 5.0); // same age, very small (good size score)
+
+        let focus_w = ScoringWeights {
+            recency: 0.15,
+            size: 0.05,
+            proximity: 0.45,
+            dependency: 0.35,
+        };
+        let focus_paths = vec![PathBuf::from("src/scoring/mod.rs")];
+
+        let s_focus = score_entry(&focus_file, &focus_w, &focus_paths, None).composite_score;
+        let s_other = score_entry(&unrelated, &focus_w, &focus_paths, None).composite_score;
+
+        assert!(
+            s_focus > s_other,
+            "focus file itself (score={s_focus:.3}) should outrank unrelated file (score={s_other:.3})"
+        );
+    }
 }

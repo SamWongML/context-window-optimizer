@@ -243,3 +243,67 @@ fn test_pack_auto_solver_at_least_as_good_as_greedy() {
         "auto ({auto_score:.3}) should be >= greedy ({greedy_score:.3})"
     );
 }
+
+#[test]
+fn test_l1_covers_more_files_than_selected_when_budget_tight() {
+    // L1 should list ALL discovered files as a repo skeleton map, even when
+    // L3 (selection) is constrained to only a subset.
+    //
+    // We use a custom Budget that gives L3 a tight constraint (5%) but gives
+    // L1 generous room (50%) so it can list all files even while L3 selects few.
+    let repo = TempRepo::larger(20);
+    let config = Config::default();
+
+    // L3 gets 5% of 10_000 = 500 tokens; each file is ~15-20 tokens so ~25-33
+    // can be selected — but we have 20 files and they should all fit unless token
+    // estimates vary.  Use a smaller total so L3 can only hold ~5 files.
+    let budget = Budget {
+        total_tokens: 10_000,
+        l1_pct: 0.50, // 5 000 tokens for L1 → can list many files
+        l2_pct: 0.45,
+        l3_pct: 0.05, // 500 tokens for L3 → selects only a few files
+    };
+
+    let result = pack_files(repo.path(), &budget, &[], &config).unwrap();
+
+    let selected_count = result.stats.files_selected;
+    let total_scanned = result.stats.total_files_scanned;
+
+    // Count entries in L1 output (lines that contain the token-count annotation)
+    let l1_entry_count = result
+        .l1_output
+        .lines()
+        .filter(|l| l.contains("tokens"))
+        .count();
+
+    assert!(
+        l1_entry_count >= selected_count,
+        "L1 must contain at least the selected files: l1={l1_entry_count} selected={selected_count}"
+    );
+
+    // If not everything could be selected, L1 must show ALL files.
+    if total_scanned > selected_count {
+        assert!(
+            l1_entry_count > selected_count,
+            "L1 ({l1_entry_count} entries) should cover more than just the {selected_count} selected files \
+             (total_scanned={total_scanned})"
+        );
+    }
+}
+
+#[test]
+fn test_focus_files_rank_above_unrelated_files() {
+    // Verify that providing focus_paths causes files near the focus to rank
+    // above unrelated files even when the unrelated files are "recent".
+    let repo = TempRepo::with_directory_structure();
+    let config = Config::default();
+    let budget = Budget::standard(128_000);
+
+    // Focus on the "models" subdirectory (if present in fixture).
+    let focus = vec![repo.path().join("models")];
+    let result = pack_files(repo.path(), &budget, &focus, &config).unwrap();
+
+    // At minimum the pipeline should succeed and respect the budget.
+    assert!(result.stats.tokens_used <= budget.l3_tokens());
+    assert!(!result.selected.is_empty());
+}

@@ -49,7 +49,7 @@ pub mod feedback;
 #[cfg(feature = "watch")]
 pub mod watch;
 
-use config::Config;
+use config::{Config, ScoringWeights};
 use error::OptimError;
 use index::{
     dedup::{dedup_by_hash, dedup_near_duplicates},
@@ -58,6 +58,7 @@ use index::{
 use output::format::{format_l1, format_l2, format_l3};
 use scoring::score_entries_with_feedback;
 use selection::knapsack::select_items;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use types::{Budget, PackResult, PackStats};
 
@@ -149,14 +150,30 @@ pub fn pack_files_with_options(
     };
 
     // Step 3: Score in parallel (with feedback multipliers if available)
+    //
+    // When focus_paths are provided we boost proximity and dependency weights so
+    // that files near or imported-by the focus set rank significantly higher than
+    // unrelated recently-modified files.
+    let focus_weights = if !focus_paths.is_empty() {
+        ScoringWeights {
+            recency: 0.15,
+            size: 0.05,
+            proximity: 0.45,
+            dependency: 0.35,
+        }
+    } else {
+        config.weights.clone()
+    };
+
     #[cfg(feature = "feedback")]
     let (effective_weights, feedback_multipliers) = {
         let db_path = std::path::Path::new(&repo).join(&config.feedback.db_path);
-        load_feedback_context(&db_path, &config.weights)
+        let (fb_weights, multipliers) = load_feedback_context(&db_path, &focus_weights);
+        (fb_weights, multipliers)
     };
     #[cfg(not(feature = "feedback"))]
     let (effective_weights, feedback_multipliers) =
-        { (config.weights.clone(), std::collections::HashMap::new()) };
+        { (focus_weights, std::collections::HashMap::new()) };
 
     let scored = score_entries_with_feedback(
         &files,
@@ -173,6 +190,16 @@ pub fn pack_files_with_options(
     } else {
         None
     };
+
+    // Preserve the full scored list for L1 (repo skeleton) before knapsack
+    // selection consumes it.  L1 is a map of ALL files, sorted by score.
+    let mut all_scored = scored.clone();
+    all_scored.sort_unstable_by(|a, b| {
+        b.composite_score
+            .partial_cmp(&a.composite_score)
+            .unwrap_or(Ordering::Equal)
+    });
+
     let result = select_items(
         scored,
         l3_budget,
@@ -196,7 +223,10 @@ pub fn pack_files_with_options(
     );
 
     // Step 5: Format outputs
-    let l1_output = format_l1(&selected, include_signatures);
+    // L1 — skeleton map of ALL repo files (sorted by score, truncated to l1 budget).
+    // L2 — metadata blocks for the knapsack-SELECTED files only.
+    // L3 — full XML-wrapped content for selected files.
+    let l1_output = format_l1(&all_scored, include_signatures, budget.l1_tokens());
     let l2_output = format_l2(&selected);
     let l3_output = format_l3(&selected);
 
