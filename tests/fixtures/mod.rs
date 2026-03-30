@@ -135,6 +135,93 @@ pub fn count_items(input: &str) -> usize {
         Self { dir }
     }
 
+    /// Create a repo with exactly one source file.
+    pub fn single_file() -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        write_file(dir.path(), "src/lib.rs", LIB_RS);
+        Self { dir }
+    }
+
+    /// Create a repo where every file has identical content (all are exact duplicates).
+    pub fn all_duplicates(n: usize) -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let content = "fn duplicated_content() { /* identical */ }\n";
+        for i in 0..n {
+            write_file(dir.path(), &format!("src/dup_{i}.rs"), content);
+        }
+        Self { dir }
+    }
+
+    /// Create a repo with a mix of small source files and one very large file.
+    /// The large file is named `huge_generated.rs` and is designed to exceed
+    /// typical `max_file_tokens` limits.
+    pub fn with_oversized_files() -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        // Normal-sized files
+        write_file(root, "src/small_a.rs", "pub fn a() -> u32 { 1 }");
+        write_file(root, "src/small_b.rs", "pub fn b() -> u32 { 2 }");
+
+        // A huge file: repeat a function body ~10 000 times to blow past token limits
+        let repeated = "pub fn generated_fn() -> u64 { 42 }\n".repeat(300);
+        let huge = format!("// auto-generated — do not edit\n{repeated}");
+        write_file(root, "src/huge_generated.rs", &huge);
+
+        Self { dir }
+    }
+
+    /// Create a repo where files are clearly split into a "core" module and
+    /// "utils" module.  Used to verify that focus-path ranking drives selection
+    /// toward the focused module.
+    pub fn with_focus_relevance() -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        // Core module — files we want to focus on
+        write_file(root, "src/core/logic.rs",
+            "pub fn core_logic(x: u64) -> u64 { x * 2 }\npub fn helper(x: u64) -> u64 { x + 1 }");
+        write_file(root, "src/core/types.rs",
+            "pub struct CoreData { pub value: u64 }");
+        write_file(root, "src/core/mod.rs",
+            "pub mod logic;\npub mod types;");
+
+        // Utils module — unrelated to core focus
+        write_file(root, "src/utils/string.rs",
+            "pub fn trim_ws(s: &str) -> &str { s.trim() }");
+        write_file(root, "src/utils/math.rs",
+            "pub fn clamp(x: f64, lo: f64, hi: f64) -> f64 { x.max(lo).min(hi) }");
+        write_file(root, "src/utils/mod.rs",
+            "pub mod string;\npub mod math;");
+
+        // Top-level files
+        write_file(root, "src/lib.rs",
+            "pub mod core;\npub mod utils;");
+        write_file(root, "README.md",
+            "# Focus Relevance Test Fixture\n");
+
+        Self { dir }
+    }
+
+    /// Create a repo with source files in multiple programming languages.
+    pub fn with_mixed_languages() -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        write_file(root, "src/main.rs",
+            "fn main() { println!(\"hello\"); }");
+        write_file(root, "src/utils.ts",
+            "export function add(a: number, b: number): number { return a + b; }");
+        write_file(root, "src/helper.py",
+            "def greet(name: str) -> str:\n    return f\"Hello, {name}\"");
+        write_file(root, "src/server.go",
+            "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"hello\") }");
+        write_file(root, "README.md",
+            "# Multi-language fixture\n");
+
+        Self { dir }
+    }
+
     /// Root path of this repo.
     pub fn path(&self) -> &Path {
         self.dir.path()
