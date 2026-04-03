@@ -1,5 +1,9 @@
 // Test fixture helpers — create temporary repositories for integration tests.
 
+pub mod builder;
+pub mod content;
+pub mod scenarios;
+
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -41,9 +45,7 @@ impl TempRepo {
         let root = dir.path();
 
         for i in 0..n_files {
-            let content = format!(
-                "/// File {i}\npub fn function_{i}() -> usize {{\n    {i}\n}}\n"
-            );
+            let content = format!("/// File {i}\npub fn function_{i}() -> usize {{\n    {i}\n}}\n");
             write_file(root, &format!("src/module_{i}.rs"), &content);
         }
 
@@ -108,7 +110,11 @@ pub fn count_items(input: &str) -> usize {
 
         write_file(root, "src/processor_a.rs", base);
         write_file(root, "src/processor_b.rs", variant); // near-duplicate
-        write_file(root, "src/unique.rs", "pub fn unique_function() -> u32 { 42 }");
+        write_file(
+            root,
+            "src/unique.rs",
+            "pub fn unique_function() -> u32 { 42 }",
+        );
 
         Self { dir }
     }
@@ -119,18 +125,50 @@ pub fn count_items(input: &str) -> usize {
         let root = dir.path();
 
         // 3 files in src/scoring/
-        write_file(root, "src/scoring/signals.rs", "pub fn recency() -> f32 { 0.9 }");
-        write_file(root, "src/scoring/weights.rs", "pub fn default_weights() -> f32 { 0.5 }");
-        write_file(root, "src/scoring/mod.rs", "pub mod signals;\npub mod weights;");
+        write_file(
+            root,
+            "src/scoring/signals.rs",
+            "pub fn recency() -> f32 { 0.9 }",
+        );
+        write_file(
+            root,
+            "src/scoring/weights.rs",
+            "pub fn default_weights() -> f32 { 0.5 }",
+        );
+        write_file(
+            root,
+            "src/scoring/mod.rs",
+            "pub mod signals;\npub mod weights;",
+        );
 
         // 3 files in src/index/
-        write_file(root, "src/index/discovery.rs", "pub fn discover() -> Vec<String> { vec![] }");
-        write_file(root, "src/index/tokenizer.rs", "pub fn count_tokens() -> usize { 0 }");
-        write_file(root, "src/index/mod.rs", "pub mod discovery;\npub mod tokenizer;");
+        write_file(
+            root,
+            "src/index/discovery.rs",
+            "pub fn discover() -> Vec<String> { vec![] }",
+        );
+        write_file(
+            root,
+            "src/index/tokenizer.rs",
+            "pub fn count_tokens() -> usize { 0 }",
+        );
+        write_file(
+            root,
+            "src/index/mod.rs",
+            "pub mod discovery;\npub mod tokenizer;",
+        );
 
         // 2 files in tests/
-        write_file(root, "tests/test_scoring.rs", "fn test_score() { assert!(true); }");
-        write_file(root, "tests/test_index.rs", "fn test_index() { assert!(true); }");
+        write_file(
+            root,
+            "tests/test_scoring.rs",
+            "fn test_score() { assert!(true); }",
+        );
+        write_file(
+            root,
+            "tests/test_index.rs",
+            "fn test_index() { assert!(true); }",
+        );
 
         Self { dir }
     }

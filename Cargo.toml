@@ -72,6 +72,7 @@ tempfile = "3"
 assert_cmd = "2"              # CLI integration tests
 predicates = "3"              # CLI output assertions
 tokio-test = "0.4"
+rand = "0.8"
 
 [features]
 default = ["mcp", "ast"]
@@ -106,6 +107,10 @@ harness = false
 
 [[bench]]
 name = "simhash"
+harness = false
+
+[[bench]]
+name = "realistic"
 harness = false
 
 [profile.release]

@@ -1,12 +1,8 @@
 //! Integration tests for the full pack pipeline.
 
-mod fixtures {
-    include!("../../tests/fixtures/mod.rs");
-}
-
+use crate::fixtures::TempRepo;
 use ctx_optim::selection::diversity::{DiversityConfig, GroupingStrategy};
 use ctx_optim::{config::Config, pack_files, types::Budget};
-use fixtures::TempRepo;
 
 #[test]
 fn test_pack_minimal_repo_succeeds() {
