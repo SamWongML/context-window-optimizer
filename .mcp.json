@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ctx-optim": {
+      "type": "stdio",
+      "command": "/Users/demon/codes/context-window-optimizer/target/release/ctx-optim",
+      "args": [
+        "serve"
+      ],
+      "env": {}
+    }
+  }
+}
