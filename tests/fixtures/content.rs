@@ -37,9 +37,9 @@ pub enum FileSize {
 /// ```
 pub fn generate_rust(size: FileSize, index: usize) -> String {
     match size {
-        FileSize::Tiny => format!(
-            "/// Tiny stub {index}.\npub fn rust_tiny_{index}() -> usize {{ {index} }}\n"
-        ),
+        FileSize::Tiny => {
+            format!("/// Tiny stub {index}.\npub fn rust_tiny_{index}() -> usize {{ {index} }}\n")
+        }
         FileSize::Small => format!(
             r#"/// Small Rust module {index}.
 use std::fmt;
@@ -579,9 +579,7 @@ pub fn generate_non_code(filename: &str, index: usize) -> String {
         "json" => generate_json(filename, index),
         "yaml" | "yml" => generate_yaml(filename, index),
         "css" => generate_css(filename, index),
-        _ => format!(
-            "# {filename} (index {index})\n\nPlain-text fixture file.\n"
-        ),
+        _ => format!("# {filename} (index {index})\n\nPlain-text fixture file.\n"),
     }
 }
 
