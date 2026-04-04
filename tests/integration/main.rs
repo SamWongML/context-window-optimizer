@@ -1,5 +1,6 @@
 //! Integration tests for the ctx-optim CLI and library.
 
+#[allow(dead_code, unused_imports)]
 #[path = "../fixtures/mod.rs"]
 mod fixtures;
 
