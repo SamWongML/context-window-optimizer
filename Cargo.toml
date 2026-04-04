@@ -23,8 +23,7 @@ serde_json = "1"
 toml = "0.8"                  # Config file parsing
 
 # ── Token Counting ──
-tiktoken-rs = "0.9"           # BPE tokenizer — cl100k_base for Claude estimation
-# Alternative: bpe + bpe-openai for 4x speed + interval counting (GitHub's impl)
+bpe-openai = "0.3"            # Fast BPE tokenizer — cl100k_base, zero-alloc count(), linear worst-case
 
 # ── AST / Code Analysis (Phase 2) ──
 tree-sitter = { version = "0.26", optional = true }

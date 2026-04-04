@@ -7,7 +7,7 @@ pub mod dedup;
 /// SimHash fingerprinting for near-duplicate detection.
 pub mod simhash;
 
-/// Token counting via tiktoken (cl100k_base).
+/// Token counting via bpe-openai (cl100k_base) and fast byte-class estimation.
 pub mod tokenizer;
 
 /// AST analysis via tree-sitter: signature extraction and import detection.

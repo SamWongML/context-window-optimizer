@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     error::OptimError,
-    index::{dedup::md5_hash, simhash::simhash_fingerprint, tokenizer::Tokenizer},
+    index::{dedup::md5_hash, simhash::simhash_fingerprint, tokenizer::estimate_tokens_bytes},
     types::{FileEntry, FileMetadata, GitMetadata, Language},
 };
 use dashmap::DashMap;
@@ -213,7 +213,7 @@ fn batch_git_metadata(repo: &git2::Repository, paths: &[PathBuf]) -> HashMap<Pat
 /// - Respects `.gitignore` and `.ignore` files via the `ignore` crate.
 /// - Skips files exceeding `max_file_bytes`.
 /// - Hashes content with MD5 (for dedup).
-/// - Counts tokens using `tiktoken`.
+/// - Estimates tokens using byte-class heuristics (fast path).
 /// - Extracts git metadata when available.
 ///
 /// # Errors
@@ -242,8 +242,6 @@ struct WalkRecord {
 }
 
 pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimError> {
-    let tokenizer = Tokenizer::new()?;
-
     // Check whether a git repo is reachable (used later for batch git metadata).
     let repo_root: Option<PathBuf> = git2::Repository::discover(&opts.root)
         .ok()
@@ -400,7 +398,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
     let records: Vec<Option<WalkRecord>> = raw_files
         .into_par_iter()
         .map(|raw| {
-            let token_count = tokenizer.count_bytes(&raw.content);
+            let token_count = estimate_tokens_bytes(&raw.content);
             if token_count > max_file_tokens {
                 return None;
             }
