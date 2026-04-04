@@ -85,8 +85,9 @@ pub fn web_fullstack() -> RealisticRepo {
 /// ```
 pub fn rust_workspace() -> RealisticRepo {
     // Collect server/src/ paths for recent_edits.
-    let server_src_paths: Vec<String> =
-        (0..20).map(|i| format!("server/src/module_{i}.rs")).collect();
+    let server_src_paths: Vec<String> = (0..20)
+        .map(|i| format!("server/src/module_{i}.rs"))
+        .collect();
 
     RealisticRepoBuilder::new()
         .seed(2)
@@ -159,8 +160,9 @@ pub fn rust_workspace() -> RealisticRepo {
 /// ```
 pub fn polyglot_monorepo() -> RealisticRepo {
     // Burst paths: some files in services/web/ (TS module paths)
-    let burst_paths: Vec<String> =
-        (0..10).map(|i| format!("services/web/module{i}.ts")).collect();
+    let burst_paths: Vec<String> = (0..10)
+        .map(|i| format!("services/web/module{i}.ts"))
+        .collect();
 
     RealisticRepoBuilder::new()
         .seed(3)
@@ -238,8 +240,7 @@ pub fn polyglot_monorepo() -> RealisticRepo {
 /// ```
 pub fn legacy_with_duplication() -> RealisticRepo {
     // Burst on src/core/ regular files
-    let burst_paths: Vec<String> =
-        (0..7).map(|i| format!("src/core/module_{i}.rs")).collect();
+    let burst_paths: Vec<String> = (0..7).map(|i| format!("src/core/module_{i}.rs")).collect();
 
     RealisticRepoBuilder::new()
         .seed(4)
