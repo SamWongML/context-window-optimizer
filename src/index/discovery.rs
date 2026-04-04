@@ -7,7 +7,7 @@ use crate::{
 use dashmap::DashMap;
 use ignore::WalkBuilder;
 use std::{
-    cell::RefCell,
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
@@ -23,11 +23,6 @@ static GIT_CACHE: OnceLock<GitCache> = OnceLock::new();
 
 fn git_cache() -> &'static GitCache {
     GIT_CACHE.get_or_init(DashMap::new)
-}
-
-// Per-thread git2::Repository handle used during the parallel enrichment phase.
-thread_local! {
-    static THREAD_REPO: RefCell<Option<git2::Repository>> = const { RefCell::new(None) };
 }
 
 /// Options controlling which files to discover.
@@ -77,91 +72,140 @@ impl DiscoveryOptions {
     }
 }
 
-/// Attempt to read Git metadata (age and commit count) for a file.
+/// Batch-compute git metadata for all given paths in a single revwalk.
 ///
-/// Counts commits that actually **modified** the file (blob OID changed from parent),
-/// not all commits where the file existed. This gives a correct recency signal for
-/// scoring — a file last modified 6 months ago will score lower than one touched
-/// yesterday, even if both are tracked in HEAD.
+/// Instead of N separate revwalks (one per file), this does **one** revwalk and
+/// uses `diff_tree_to_tree` per commit to identify all changed files at once.
+/// For C commits and N files this is O(C × D_avg) where D_avg is the average
+/// number of files changed per commit, instead of O(N × C) tree lookups.
 ///
-/// Returns `None` if the file is not in a git repository or git is unavailable.
-fn read_git_metadata(repo: &git2::Repository, path: &Path) -> Option<GitMetadata> {
-    let relative = path
-        .strip_prefix(repo.workdir().unwrap_or_else(|| repo.path()))
-        .ok()?;
+/// Returns a map from absolute path → `GitMetadata`. Files that were never
+/// changed in the traversed commits (or that cannot be resolved) are absent
+/// from the result.
+fn batch_git_metadata(repo: &git2::Repository, paths: &[PathBuf]) -> HashMap<PathBuf, GitMetadata> {
+    let workdir = match repo.workdir() {
+        Some(w) => w,
+        None => return HashMap::new(),
+    };
 
-    let mut revwalk = repo.revwalk().ok()?;
-    revwalk.push_head().ok()?;
-
-    let mut commit_count = 0u32;
-    let mut latest_time: Option<i64> = None;
-    // Cap total commits traversed (not just modifications) to bound latency on large repos.
-    // 500 is sufficient for recency signals and keeps per-file cost under ~1 ms.
-    let mut commits_visited = 0u32;
-    const MAX_COMMITS: u32 = 500;
+    const MAX_COMMITS: usize = 500;
     const MAX_MODIFICATIONS: u32 = 100;
 
+    struct FileState {
+        commit_count: u32,
+        latest_time: Option<i64>,
+        abs_index: usize,
+    }
+
+    let mut file_states: HashMap<PathBuf, FileState> = HashMap::with_capacity(paths.len());
+    let mut remaining = 0usize; // files not yet at MAX_MODIFICATIONS
+
+    for (i, path) in paths.iter().enumerate() {
+        if let Ok(relative) = path.strip_prefix(workdir) {
+            file_states.insert(
+                relative.to_path_buf(),
+                FileState {
+                    commit_count: 0,
+                    latest_time: None,
+                    abs_index: i,
+                },
+            );
+            remaining += 1;
+        }
+    }
+
+    let mut revwalk = match repo.revwalk() {
+        Ok(rw) => rw,
+        Err(_) => return HashMap::new(),
+    };
+    if revwalk.push_head().is_err() {
+        return HashMap::new();
+    }
+
+    let mut commits_visited = 0usize;
+
     for oid in revwalk.flatten() {
-        commits_visited += 1;
-        if commits_visited > MAX_COMMITS {
+        if remaining == 0 || commits_visited >= MAX_COMMITS {
             break;
         }
+        commits_visited += 1;
 
         let commit = match repo.find_commit(oid) {
             Ok(c) => c,
             Err(_) => continue,
         };
-
-        let tree = match commit.tree() {
+        let commit_tree = match commit.tree() {
             Ok(t) => t,
             Err(_) => continue,
         };
+        let commit_time = commit.time().seconds();
 
-        let current_oid = tree.get_path(relative).ok().map(|e| e.id());
+        // Parent tree (None for the initial commit → diff against empty tree)
+        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
 
-        // Compare to the first parent's blob OID to detect whether this commit
-        // actually changed the file (rather than just passing it through).
-        let parent_oid = commit
-            .parent(0)
-            .ok()
-            .and_then(|p| p.tree().ok())
-            .and_then(|pt| pt.get_path(relative).ok())
-            .map(|e| e.id());
-
-        let changed = match (current_oid, parent_oid) {
-            (Some(cur), Some(par)) => cur != par, // content changed
-            (Some(_), None) => true,              // file introduced in this commit
-            _ => false,                           // file absent or only in parent (deletion)
+        let diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None) {
+            Ok(d) => d,
+            Err(_) => continue,
         };
 
-        if changed {
-            commit_count += 1;
-            if latest_time.is_none() {
-                latest_time = Some(commit.time().seconds());
+        for delta in diff.deltas() {
+            // Only count additions and modifications, not deletions
+            match delta.status() {
+                git2::Delta::Added | git2::Delta::Modified | git2::Delta::Copied => {}
+                _ => continue,
             }
-            if commit_count >= MAX_MODIFICATIONS {
-                break;
+
+            let delta_path = match delta.new_file().path() {
+                Some(p) => p,
+                None => continue,
+            };
+
+            if let Some(state) = file_states.get_mut(delta_path) {
+                if state.commit_count < MAX_MODIFICATIONS {
+                    state.commit_count += 1;
+                    if state.latest_time.is_none() {
+                        state.latest_time = Some(commit_time);
+                    }
+                    if state.commit_count >= MAX_MODIFICATIONS {
+                        remaining -= 1;
+                    }
+                }
             }
         }
     }
 
-    if commit_count == 0 {
-        return None;
+    tracing::debug!(
+        "batch git metadata: {} files, {} commits visited, {} fully resolved",
+        paths.len(),
+        commits_visited,
+        paths.len() - remaining,
+    );
+
+    // Convert to result HashMap<absolute_path, GitMetadata>
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let mut result = HashMap::with_capacity(file_states.len());
+    for (_, state) in file_states {
+        if state.commit_count == 0 {
+            continue;
+        }
+        if let Some(latest) = state.latest_time {
+            let diff_secs = (now - latest).max(0);
+            let age_days = diff_secs as f64 / 86_400.0;
+            result.insert(
+                paths[state.abs_index].clone(),
+                GitMetadata {
+                    age_days,
+                    commit_count: state.commit_count,
+                },
+            );
+        }
     }
 
-    let age_days = latest_time.map(|t| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let diff_secs = (now - t).max(0);
-        diff_secs as f64 / 86_400.0
-    })?;
-
-    Some(GitMetadata {
-        age_days,
-        commit_count,
-    })
+    result
 }
 
 /// Walk a directory and collect `FileEntry` records.
@@ -200,7 +244,7 @@ struct WalkRecord {
 pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimError> {
     let tokenizer = Tokenizer::new()?;
 
-    // Check whether a git repo is reachable (used later for per-thread opens).
+    // Check whether a git repo is reachable (used later for batch git metadata).
     let repo_root: Option<PathBuf> = git2::Repository::discover(&opts.root)
         .ok()
         .and_then(|r| r.workdir().map(|p| p.to_path_buf()));
@@ -231,14 +275,24 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         }
     });
 
+    // ── Phase 1a: serial walk ───────────────────────────────────────────────
+    // Walk the directory tree and read file contents.  Only cheap filtering
+    // (extension, size, binary) is done here.  Expensive per-file work
+    // (tokenization, hashing, AST) is deferred to Phase 1b (parallel).
     let walker = builder.build();
-    let mut records: Vec<WalkRecord> = Vec::new();
     let mut skipped_size = 0usize;
     let mut skipped_binary = 0usize;
 
-    // ── Phase 1: serial walk ─────────────────────────────────────────────────
-    // Collect file content and compute all cheap fields synchronously.
-    // Git metadata is deferred to Phase 2 where it is parallelised.
+    struct RawFile {
+        path: PathBuf,
+        size_bytes: u64,
+        last_modified: SystemTime,
+        content: Vec<u8>,
+        language: Option<Language>,
+    }
+
+    let mut raw_files: Vec<RawFile> = Vec::new();
+
     for result in walker {
         let dir_entry = match result {
             Ok(e) => e,
@@ -297,20 +351,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             continue;
         }
 
-        // Token count
-        let token_count = tokenizer.count_bytes(&content);
-        if token_count > opts.max_file_tokens {
-            tracing::trace!(
-                "skipping file over token limit: {} ({token_count} tokens)",
-                path.display()
-            );
-            continue;
-        }
-
-        // Hash
-        let hash = md5_hash(&content);
-
-        // Language
+        // Language detection (cheap — just extension lookup)
         let language = path
             .extension()
             .and_then(|e| e.to_str())
@@ -323,38 +364,76 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        // AST analysis via tree-sitter (if feature enabled and language supported)
-        #[cfg(feature = "ast")]
-        let ast =
-            language.and_then(|lang| super::ast::analyze_file(&content, lang, opts.max_ast_bytes));
-        #[cfg(not(feature = "ast"))]
-        let ast: Option<crate::types::AstData> = None;
-
-        // SimHash fingerprint for near-duplicate detection
-        let simhash = if opts.compute_simhash {
-            Some(simhash_fingerprint(&content, opts.shingle_size))
-        } else {
-            None
-        };
-
-        records.push(WalkRecord {
+        raw_files.push(RawFile {
             path,
             size_bytes,
             last_modified,
-            token_count,
-            hash,
+            content,
             language,
-            ast,
-            simhash,
         });
     }
 
     tracing::info!(
-        "discovery: {} files indexed, {} skipped (size), {} skipped (binary)",
-        records.len(),
+        "discovery walk: {} files collected, {} skipped (size), {} skipped (binary)",
+        raw_files.len(),
         skipped_size,
         skipped_binary
     );
+
+    if raw_files.is_empty() {
+        return Err(OptimError::EmptyRepo {
+            path: opts.root.display().to_string(),
+        });
+    }
+
+    // ── Phase 1b: parallel processing ───────────────────────────────────────
+    // Tokenize, hash, AST-parse, and SimHash in parallel via rayon.
+    // Tree-sitter parsing dominates serial Phase 1 cost (~2.8ms/file),
+    // so parallelizing this phase gives a near-linear speedup with cores.
+    use rayon::prelude::*;
+
+    let compute_simhash = opts.compute_simhash;
+    let shingle_size = opts.shingle_size;
+    let max_file_tokens = opts.max_file_tokens;
+    let max_ast_bytes = opts.max_ast_bytes;
+
+    let records: Vec<Option<WalkRecord>> = raw_files
+        .into_par_iter()
+        .map(|raw| {
+            let token_count = tokenizer.count_bytes(&raw.content);
+            if token_count > max_file_tokens {
+                return None;
+            }
+
+            let hash = md5_hash(&raw.content);
+
+            #[cfg(feature = "ast")]
+            let ast = raw
+                .language
+                .and_then(|lang| super::ast::analyze_file(&raw.content, lang, max_ast_bytes));
+            #[cfg(not(feature = "ast"))]
+            let ast: Option<crate::types::AstData> = None;
+
+            let simhash = if compute_simhash {
+                Some(simhash_fingerprint(&raw.content, shingle_size))
+            } else {
+                None
+            };
+
+            Some(WalkRecord {
+                path: raw.path,
+                size_bytes: raw.size_bytes,
+                last_modified: raw.last_modified,
+                token_count,
+                hash,
+                language: raw.language,
+                ast,
+                simhash,
+            })
+        })
+        .collect();
+
+    let records: Vec<WalkRecord> = records.into_iter().flatten().collect();
 
     if records.is_empty() {
         return Err(OptimError::EmptyRepo {
@@ -362,17 +441,18 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         });
     }
 
-    // ── Phase 2: parallel git metadata enrichment ────────────────────────────
-    // Each rayon thread opens its own git2::Repository via thread_local storage
-    // to avoid the !Send constraint of git2::Repository.
-    // Results are also stored in the process-wide GIT_CACHE keyed by
-    // (path, mtime_secs) so subsequent MCP calls skip the git walk entirely
-    // for unchanged files.
-    use rayon::prelude::*;
+    // ── Phase 2: batch git metadata enrichment ────────────────────────────────
+    // A single revwalk + diff_tree_to_tree processes all files at once instead
+    // of N separate revwalks.  The process-wide GIT_CACHE is still checked
+    // first so repeated MCP calls skip the git walk for unchanged files.
 
-    let entries: Vec<FileEntry> = records
-        .into_par_iter()
-        .map(|rec| {
+    let mut git_metadata_vec: Vec<Option<GitMetadata>> = vec![None; records.len()];
+
+    if let Some(root) = &repo_root {
+        // Check which files are already cached
+        let mut uncached_indices: Vec<usize> = Vec::new();
+
+        for (i, rec) in records.iter().enumerate() {
             let mtime_key = rec
                 .last_modified
                 .duration_since(UNIX_EPOCH)
@@ -380,39 +460,51 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 .as_secs();
             let cache_key = (rec.path.clone(), mtime_key);
 
-            let git = if let Some(root) = &repo_root {
-                // Check process-level cache first
-                if let Some(cached) = git_cache().get(&cache_key) {
-                    cached.clone()
-                } else {
-                    // Open (or reuse) a per-thread repository handle
-                    let result = THREAD_REPO.with(|cell| {
-                        let mut slot = cell.borrow_mut();
-                        if slot.is_none() {
-                            *slot = git2::Repository::open(root).ok();
-                        }
-                        slot.as_ref().and_then(|r| read_git_metadata(r, &rec.path))
-                    });
-                    git_cache().insert(cache_key, result.clone());
-                    result
-                }
+            if let Some(cached) = git_cache().get(&cache_key) {
+                git_metadata_vec[i] = cached.clone();
             } else {
-                None
-            };
-
-            FileEntry {
-                path: rec.path,
-                token_count: rec.token_count,
-                hash: rec.hash,
-                metadata: FileMetadata {
-                    size_bytes: rec.size_bytes,
-                    last_modified: rec.last_modified,
-                    git,
-                    language: rec.language,
-                },
-                ast: rec.ast,
-                simhash: rec.simhash,
+                uncached_indices.push(i);
             }
+        }
+
+        // Batch-compute metadata for all uncached files in a single revwalk
+        if !uncached_indices.is_empty() {
+            if let Ok(repo) = git2::Repository::open(root) {
+                let uncached_paths: Vec<PathBuf> = uncached_indices
+                    .iter()
+                    .map(|&i| records[i].path.clone())
+                    .collect();
+                let batch = batch_git_metadata(&repo, &uncached_paths);
+
+                for &i in &uncached_indices {
+                    let meta = batch.get(&records[i].path).cloned();
+                    let mtime_key = records[i]
+                        .last_modified
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    git_cache().insert((records[i].path.clone(), mtime_key), meta.clone());
+                    git_metadata_vec[i] = meta;
+                }
+            }
+        }
+    }
+
+    let entries: Vec<FileEntry> = records
+        .into_iter()
+        .zip(git_metadata_vec)
+        .map(|(rec, git)| FileEntry {
+            path: rec.path,
+            token_count: rec.token_count,
+            hash: rec.hash,
+            metadata: FileMetadata {
+                size_bytes: rec.size_bytes,
+                last_modified: rec.last_modified,
+                git,
+                language: rec.language,
+            },
+            ast: rec.ast,
+            simhash: rec.simhash,
         })
         .collect();
 
