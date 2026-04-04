@@ -10,6 +10,8 @@ mod rust;
 mod typescript;
 
 use crate::types::{AstData, Language};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use tree_sitter::Parser;
 use tree_sitter_language::LanguageFn;
 
@@ -21,10 +23,23 @@ pub(crate) struct LanguageQueries {
     pub imports: &'static str,
 }
 
+// ---------------------------------------------------------------------------
+// Thread-local parser pool: one Parser per Language per thread.
+//
+// Creating a Parser + calling set_language() allocates internal parsing tables
+// (~2-3ms per call).  Reusing parsers across files of the same language on the
+// same rayon thread eliminates this overhead entirely.
+// ---------------------------------------------------------------------------
+thread_local! {
+    static PARSERS: RefCell<HashMap<Language, Parser>> = RefCell::new(HashMap::new());
+}
+
 /// Parse a source file and extract signatures + imports.
 ///
 /// Returns `None` if the language is unsupported, the file exceeds
 /// `max_ast_bytes`, or parsing fails.
+///
+/// Uses a thread-local parser pool to avoid re-creating parsers per file.
 ///
 /// # Examples
 /// ```
@@ -49,22 +64,25 @@ pub fn analyze_file(source: &[u8], language: Language, max_ast_bytes: usize) -> 
     let (lang_fn, lq) = grammar_for(language)?;
     let ts_lang = tree_sitter::Language::from(lang_fn);
 
-    let mut parser = Parser::new();
-    parser
-        .set_language(&ts_lang)
-        .map_err(|e| {
-            tracing::warn!("failed to set tree-sitter language: {e}");
+    PARSERS.with(|parsers| {
+        let mut map = parsers.borrow_mut();
+        let parser = map.entry(language).or_insert_with(|| {
+            let mut p = Parser::new();
+            if let Err(e) = p.set_language(&ts_lang) {
+                tracing::warn!("failed to set tree-sitter language: {e}");
+            }
+            p
+        });
+
+        let tree = parser.parse(source, None)?;
+
+        let signatures = queries::extract_signatures(lq.signatures, &ts_lang, &tree, source);
+        let imports = queries::extract_imports(lq.imports, &ts_lang, &tree, source);
+
+        Some(AstData {
+            signatures,
+            imports,
         })
-        .ok()?;
-
-    let tree = parser.parse(source, None)?;
-
-    let signatures = queries::extract_signatures(lq.signatures, &ts_lang, &tree, source);
-    let imports = queries::extract_imports(lq.imports, &ts_lang, &tree, source);
-
-    Some(AstData {
-        signatures,
-        imports,
     })
 }
 

@@ -1,7 +1,80 @@
 //! Shared helpers for running tree-sitter queries and converting captures.
+//!
+//! Query compilation is cached per thread to avoid re-parsing S-expression
+//! patterns on every file.  This gives a measurable speedup when processing
+//! thousands of files with the same language.
 
 use crate::types::{ImportRef, Signature, SymbolKind};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use tree_sitter::{Language, Query, QueryCursor, StreamingIterator, Tree};
+
+// ---------------------------------------------------------------------------
+// Thread-local query cache: keyed by (query_source pointer address).
+//
+// Query::new() compiles an S-expression into an automaton — expensive when
+// called 10K times with the same static string.  Since our query strings are
+// `&'static str`, we can use the pointer address as a cheap identity key.
+// ---------------------------------------------------------------------------
+
+/// Cache key: raw pointer to the static query string.
+/// Two queries with the same source text at different addresses are treated as
+/// distinct, but that never happens in practice (all our queries are `static`).
+type QueryCacheKey = usize;
+
+/// Cached compiled query plus pre-resolved capture indices.
+struct CachedQuery {
+    query: Query,
+    /// Pre-resolved capture index for "signature" (None if absent).
+    sig_idx: Option<usize>,
+    /// Pre-resolved capture index for "name" (None if absent).
+    name_idx: Option<usize>,
+    /// Pre-resolved capture index for "import_path" (None if absent).
+    import_path_idx: Option<usize>,
+}
+
+thread_local! {
+    static QUERY_CACHE: RefCell<HashMap<QueryCacheKey, CachedQuery>> = RefCell::new(HashMap::new());
+}
+
+/// Get or compile a query, caching the result per-thread.
+fn with_cached_query<F, R>(query_source: &str, language: &Language, f: F) -> R
+where
+    F: FnOnce(&CachedQuery) -> R,
+{
+    QUERY_CACHE.with(|cache| {
+        let mut map = cache.borrow_mut();
+        let key = query_source.as_ptr() as usize;
+        let cached = map.entry(key).or_insert_with(|| {
+            let query = match Query::new(language, query_source) {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::warn!("failed to compile query: {e}");
+                    // Return a dummy — callers will get empty results
+                    return CachedQuery {
+                        query: Query::new(language, "(_)").expect("trivial query"),
+                        sig_idx: None,
+                        name_idx: None,
+                        import_path_idx: None,
+                    };
+                }
+            };
+            let sig_idx = query.capture_names().iter().position(|n| *n == "signature");
+            let name_idx = query.capture_names().iter().position(|n| *n == "name");
+            let import_path_idx = query
+                .capture_names()
+                .iter()
+                .position(|n| *n == "import_path");
+            CachedQuery {
+                query,
+                sig_idx,
+                name_idx,
+                import_path_idx,
+            }
+        });
+        f(cached)
+    })
+}
 
 /// Execute a signature query and return extracted signatures.
 ///
@@ -13,55 +86,44 @@ pub(crate) fn extract_signatures(
     tree: &Tree,
     source: &[u8],
 ) -> Vec<Signature> {
-    let query = match Query::new(language, query_source) {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::warn!("failed to compile signature query: {e}");
-            return Vec::new();
-        }
-    };
+    with_cached_query(query_source, language, |cached| {
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&cached.query, tree.root_node(), source);
+        let mut signatures = Vec::new();
 
-    let sig_idx = query.capture_names().iter().position(|n| *n == "signature");
-    let name_idx = query.capture_names().iter().position(|n| *n == "name");
+        while let Some(m) = matches.next() {
+            let sig_node = cached.sig_idx.and_then(|idx| {
+                m.captures
+                    .iter()
+                    .find(|c| c.index as usize == idx)
+                    .map(|c| c.node)
+            });
 
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source);
-    let mut signatures = Vec::new();
+            let name_node = cached.name_idx.and_then(|idx| {
+                m.captures
+                    .iter()
+                    .find(|c| c.index as usize == idx)
+                    .map(|c| c.node)
+            });
 
-    while let Some(m) = matches.next() {
-        // Get the signature node (outer node for text extraction)
-        let sig_node = sig_idx.and_then(|idx| {
-            m.captures
-                .iter()
-                .find(|c| c.index as usize == idx)
-                .map(|c| c.node)
-        });
+            let node = match sig_node.or(name_node) {
+                Some(n) => n,
+                None => continue,
+            };
 
-        let name_node = name_idx.and_then(|idx| {
-            m.captures
-                .iter()
-                .find(|c| c.index as usize == idx)
-                .map(|c| c.node)
-        });
+            let text = extract_signature_text(source, sig_node.unwrap_or(node));
+            if text.is_empty() {
+                continue;
+            }
 
-        let node = match sig_node.or(name_node) {
-            Some(n) => n,
-            None => continue,
-        };
+            let kind = node_kind_to_symbol(node.kind());
+            let line = node.start_position().row + 1;
 
-        // Extract signature text: from node start to first '{' or end of line
-        let text = extract_signature_text(source, sig_node.unwrap_or(node));
-        if text.is_empty() {
-            continue;
+            signatures.push(Signature { kind, text, line });
         }
 
-        let kind = node_kind_to_symbol(node.kind());
-        let line = node.start_position().row + 1; // 1-indexed
-
-        signatures.push(Signature { kind, text, line });
-    }
-
-    signatures
+        signatures
+    })
 }
 
 /// Execute an import query and return extracted import references.
@@ -73,41 +135,31 @@ pub(crate) fn extract_imports(
     tree: &Tree,
     source: &[u8],
 ) -> Vec<ImportRef> {
-    let query = match Query::new(language, query_source) {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::warn!("failed to compile import query: {e}");
-            return Vec::new();
-        }
-    };
+    with_cached_query(query_source, language, |cached| {
+        let path_idx = cached.import_path_idx.unwrap_or(0);
 
-    let path_idx = query
-        .capture_names()
-        .iter()
-        .position(|n| *n == "import_path")
-        .unwrap_or(0);
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&cached.query, tree.root_node(), source);
+        let mut imports = Vec::new();
 
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source);
-    let mut imports = Vec::new();
-
-    while let Some(m) = matches.next() {
-        if let Some(capture) = m.captures.iter().find(|c| c.index as usize == path_idx) {
-            let node = capture.node;
-            let raw_path = node_text(source, node)
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-            if !raw_path.is_empty() {
-                imports.push(ImportRef {
-                    raw_path,
-                    line: node.start_position().row + 1,
-                });
+        while let Some(m) = matches.next() {
+            if let Some(capture) = m.captures.iter().find(|c| c.index as usize == path_idx) {
+                let node = capture.node;
+                let raw_path = node_text(source, node)
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !raw_path.is_empty() {
+                    imports.push(ImportRef {
+                        raw_path,
+                        line: node.start_position().row + 1,
+                    });
+                }
             }
         }
-    }
 
-    imports
+        imports
+    })
 }
 
 /// Extract signature text from a node: everything up to the first `{` or end of node.
