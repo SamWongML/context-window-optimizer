@@ -18,7 +18,7 @@ context-window-optimizer/
 │   ├── index/
 │   │   ├── mod.rs               # File inventory orchestrator
 │   │   ├── discovery.rs         # ignore + git2 file walking
-│   │   ├── tokenizer.rs         # tiktoken wrapper, per-file token counts
+│   │   ├── tokenizer.rs         # bpe-openai exact counts + fast heuristic estimator
 │   │   ├── dedup.rs             # MD5 + SimHash deduplication
 │   │   └── skeleton.rs          # Phase 2: tree-sitter AST extraction
 │   ├── scoring/
