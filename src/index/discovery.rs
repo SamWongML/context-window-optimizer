@@ -503,6 +503,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             },
             ast: rec.ast,
             simhash: rec.simhash,
+            content: None,
         })
         .collect();
 

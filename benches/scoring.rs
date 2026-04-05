@@ -22,6 +22,7 @@ fn make_entry(i: usize) -> FileEntry {
         },
         ast: None,
         simhash: None,
+        content: None,
     }
 }
 

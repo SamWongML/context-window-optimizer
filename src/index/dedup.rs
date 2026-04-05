@@ -85,6 +85,7 @@ pub fn dedup_by_hash<T>(items: Vec<([u8; 16], T)>) -> (Vec<T>, usize) {
 ///     },
 ///     ast: None,
 ///     simhash: Some(0xAAAA_BBBB_CCCC_DDDD),
+///     content: None,
 /// };
 /// let (kept, removed) = dedup_near_duplicates(vec![entry], 3);
 /// assert_eq!(kept.len(), 1);
@@ -194,6 +195,7 @@ mod tests {
             },
             ast: None,
             simhash: Some(simhash),
+            content: None,
         };
 
         // Two entries with Hamming distance 1 (threshold 3 → grouped)
@@ -224,6 +226,7 @@ mod tests {
             },
             ast: None,
             simhash,
+            content: None,
         };
 
         // Two entries without simhash should never be grouped
