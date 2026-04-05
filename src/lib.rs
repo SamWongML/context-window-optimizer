@@ -229,14 +229,15 @@ pub fn pack_files_with_options(
         None
     };
 
-    // Preserve the full scored list for L1 (repo skeleton) before knapsack
-    // selection consumes it.  L1 is a map of ALL files, sorted by score.
-    let mut all_scored = scored.clone();
-    all_scored.sort_unstable_by(|a, b| {
+    // Format L1 BEFORE knapsack consumes the scored vec — avoids a full clone.
+    // Sort by score first (L1 skeleton shows all files ranked).
+    let mut scored = scored;
+    scored.sort_unstable_by(|a, b| {
         b.composite_score
             .partial_cmp(&a.composite_score)
             .unwrap_or(Ordering::Equal)
     });
+    let l1_output = format_l1(&scored, include_signatures, budget.l1_tokens());
 
     let result = select_items(
         scored,
@@ -266,10 +267,8 @@ pub fn pack_files_with_options(
     );
 
     // Step 5: Format outputs
-    // L1 — skeleton map of ALL repo files (sorted by score, truncated to l1 budget).
     // L2 — metadata blocks for the knapsack-SELECTED files only.
     // L3 — full XML-wrapped content for selected files.
-    let l1_output = format_l1(&all_scored, include_signatures, budget.l1_tokens());
     let l2_output = format_l2(&selected);
     let l3_output = format_l3(&selected);
 
