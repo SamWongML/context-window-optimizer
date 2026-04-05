@@ -239,6 +239,7 @@ struct WalkRecord {
     #[cfg(not(feature = "ast"))]
     ast: Option<crate::types::AstData>,
     simhash: Option<u64>,
+    content: Vec<u8>,
 }
 
 pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimError> {
@@ -427,6 +428,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 language: raw.language,
                 ast,
                 simhash,
+                content: raw.content,
             })
         })
         .collect();
@@ -503,7 +505,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             },
             ast: rec.ast,
             simhash: rec.simhash,
-            content: None,
+            content: Some(rec.content),
         })
         .collect();
 
@@ -805,5 +807,24 @@ mod tests {
         let cache = git_cache();
         // The cache is a DashMap — we can read its len without error.
         let _ = cache.len();
+    }
+
+    #[test]
+    fn test_discover_populates_content() {
+        let tmp = TempDir::new().unwrap();
+        let expected = "fn cached() { let x = 42; }";
+        std::fs::write(tmp.path().join("cached.rs"), expected).unwrap();
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 1);
+        let content = entries[0]
+            .content
+            .as_ref()
+            .expect("content should be populated");
+        assert_eq!(
+            std::str::from_utf8(content).unwrap(),
+            expected,
+            "cached content should match file on disk"
+        );
     }
 }
