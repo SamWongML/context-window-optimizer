@@ -307,3 +307,36 @@ pub fn scale_test(n: usize) -> RealisticRepo {
 
     builder.build()
 }
+
+// ── 6. Scale test with medium files (n files) ───────────────────────────────
+
+/// Build a scale-test repository with medium-sized files (~233 tokens avg).
+///
+/// One third of files use [`FileSize::Medium`] (~500 tokens), the rest use
+/// [`FileSize::Small`] (~100 tokens).  This distribution creates a tight
+/// budget scenario where P3 two-phase scoring provides significant savings
+/// (K << N).
+///
+/// # Examples
+///
+/// ```no_run
+/// use tests::fixtures::scenarios::scale_test_medium;
+/// let repo = scale_test_medium(1000);
+/// assert!(repo.path().join("src/mod_0").exists());
+/// ```
+pub fn scale_test_medium(n: usize) -> RealisticRepo {
+    let mut builder = RealisticRepoBuilder::new().seed(6).initial_commit(30);
+
+    for i in 0..n {
+        let subdir = i % 10;
+        let size = if i % 3 == 0 {
+            FileSize::Medium
+        } else {
+            FileSize::Small
+        };
+        let path = format!("src/mod_{subdir}/file_{i}.rs");
+        builder = builder.add_file(path, Lang::Rust, size);
+    }
+
+    builder.build()
+}
