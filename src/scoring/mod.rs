@@ -34,6 +34,7 @@ use std::path::PathBuf;
 ///     },
 ///     ast: None,
 ///     simhash: None,
+///     content: None,
 /// };
 /// let scored = score_entry(&entry, &ScoringWeights::default(), &[], None);
 /// assert!((0.0..=1.0).contains(&scored.composite_score));
@@ -178,6 +179,7 @@ mod tests {
             },
             ast: None,
             simhash: None,
+            content: None,
         }
     }
 

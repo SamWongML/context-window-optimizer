@@ -364,6 +364,7 @@ mod tests {
                     .collect(),
             }),
             simhash: None,
+            content: None,
         }
     }
 
@@ -380,6 +381,7 @@ mod tests {
             },
             ast: None,
             simhash: None,
+            content: None,
         }
     }
 

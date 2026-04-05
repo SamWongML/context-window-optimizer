@@ -120,6 +120,10 @@ pub struct FileEntry {
     /// `None` if near-dedup is disabled or fingerprint was not computed.
     #[serde(default)]
     pub simhash: Option<u64>,
+    /// Raw file content, retained for L3 output caching.
+    /// `None` when `retain_content` is false (two-phase memory optimization).
+    #[serde(default, skip_serializing)]
+    pub content: Option<Vec<u8>>,
 }
 
 /// Per-signal score breakdown, all values normalized to `[0.0, 1.0]`.
@@ -168,6 +172,7 @@ impl ScoredEntry {
     ///         },
     ///         ast: None,
     ///         simhash: None,
+    ///         content: None,
     ///     },
     ///     composite_score: 0.8,
     ///     signals: ScoreSignals::default(),
@@ -319,6 +324,7 @@ mod tests {
                 },
                 ast: None,
                 simhash: None,
+                content: None,
             },
             composite_score: score,
             signals: ScoreSignals::default(),
