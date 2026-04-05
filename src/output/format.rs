@@ -159,11 +159,15 @@ pub fn format_l3(entries: &[ScoredEntry]) -> String {
     .unwrap();
 
     for e in entries {
-        let content = match std::fs::read_to_string(&e.entry.path) {
-            Ok(c) => c,
-            Err(err) => {
-                tracing::warn!("L3: could not read {}: {err}", e.entry.path.display());
-                String::new()
+        let content = if let Some(bytes) = &e.entry.content {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            match std::fs::read_to_string(&e.entry.path) {
+                Ok(c) => c,
+                Err(err) => {
+                    tracing::warn!("L3: could not read {}: {err}", e.entry.path.display());
+                    String::new()
+                }
             }
         };
 
@@ -508,6 +512,36 @@ mod tests {
         assert!(
             out.contains("src/only.rs"),
             "first entry must always appear: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_l3_uses_cached_content() {
+        // Path does NOT exist on disk — format_l3 must use cached content
+        let mut entry = make_scored("/nonexistent/cached_test.rs", 10, 0.8);
+        entry.entry.content = Some(b"fn from_cache() {}".to_vec());
+
+        let out = format_l3(&[entry]);
+        assert!(
+            out.contains("fn from_cache()"),
+            "L3 should use cached content, not disk: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_l3_falls_back_to_disk_when_no_cached_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("disk_read.rs");
+        std::fs::write(&path, "fn from_disk() {}").unwrap();
+
+        // content is None — should fall back to reading from disk
+        let entry = make_scored(&path.to_string_lossy(), 5, 0.9);
+        assert!(entry.entry.content.is_none());
+
+        let out = format_l3(&[entry]);
+        assert!(
+            out.contains("fn from_disk()"),
+            "L3 should fall back to disk read: {out}"
         );
     }
 }
