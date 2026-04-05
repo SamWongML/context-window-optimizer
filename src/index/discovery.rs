@@ -54,6 +54,12 @@ pub struct DiscoveryOptions {
     pub compute_simhash: bool,
     /// Number of tokens per shingle for SimHash fingerprinting.
     pub shingle_size: usize,
+    /// Skip AST parsing during discovery (for two-phase optimization).
+    /// When true, all entries will have `ast: None`.
+    pub skip_ast: bool,
+    /// Retain raw file content in FileEntry for L3 caching.
+    /// When false, all entries will have `content: None` (saves memory).
+    pub retain_content: bool,
 }
 
 impl DiscoveryOptions {
@@ -68,6 +74,8 @@ impl DiscoveryOptions {
             max_ast_bytes: config.max_ast_bytes,
             compute_simhash: config.dedup.near,
             shingle_size: config.dedup.shingle_size,
+            skip_ast: false,
+            retain_content: true,
         }
     }
 }
@@ -239,7 +247,7 @@ struct WalkRecord {
     #[cfg(not(feature = "ast"))]
     ast: Option<crate::types::AstData>,
     simhash: Option<u64>,
-    content: Vec<u8>,
+    content: Option<Vec<u8>>,
 }
 
 pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimError> {
@@ -395,6 +403,8 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
     let shingle_size = opts.shingle_size;
     let max_file_tokens = opts.max_file_tokens;
     let max_ast_bytes = opts.max_ast_bytes;
+    let skip_ast = opts.skip_ast;
+    let retain_content = opts.retain_content;
 
     let records: Vec<Option<WalkRecord>> = raw_files
         .into_par_iter()
@@ -407,9 +417,12 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             let hash = md5_hash(&raw.content);
 
             #[cfg(feature = "ast")]
-            let ast = raw
-                .language
-                .and_then(|lang| super::ast::analyze_file(&raw.content, lang, max_ast_bytes));
+            let ast = if !skip_ast {
+                raw.language
+                    .and_then(|lang| super::ast::analyze_file(&raw.content, lang, max_ast_bytes))
+            } else {
+                None
+            };
             #[cfg(not(feature = "ast"))]
             let ast: Option<crate::types::AstData> = None;
 
@@ -428,7 +441,11 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 language: raw.language,
                 ast,
                 simhash,
-                content: raw.content,
+                content: if retain_content {
+                    Some(raw.content)
+                } else {
+                    None
+                },
             })
         })
         .collect();
@@ -505,7 +522,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             },
             ast: rec.ast,
             simhash: rec.simhash,
-            content: Some(rec.content),
+            content: rec.content,
         })
         .collect();
 
@@ -527,6 +544,8 @@ mod tests {
             max_ast_bytes: 256 * 1024,
             compute_simhash: false,
             shingle_size: 3,
+            skip_ast: false,
+            retain_content: true,
         }
     }
 
@@ -801,30 +820,67 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_skip_ast_returns_none_ast() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "pub fn hello() -> usize { 42 }").unwrap();
+
+        let opts = DiscoveryOptions {
+            skip_ast: true,
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].ast.is_none(),
+            "AST should be None when skip_ast is true"
+        );
+    }
+
+    #[test]
+    fn test_discover_retain_content_false_returns_none_content() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let opts = DiscoveryOptions {
+            retain_content: false,
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].content.is_none(),
+            "content should be None when retain_content is false"
+        );
+    }
+
+    #[test]
+    fn test_discover_lite_mode_still_computes_tokens_and_hash() {
+        let tmp = TempDir::new().unwrap();
+        let code = "pub fn lite_test() -> usize { 42 }";
+        std::fs::write(tmp.path().join("lite.rs"), code).unwrap();
+
+        let opts = DiscoveryOptions {
+            skip_ast: true,
+            retain_content: false,
+            ..make_opts(tmp.path())
+        };
+        let entries = discover_files(&opts).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].token_count > 0,
+            "tokens should still be computed"
+        );
+        assert_ne!(entries[0].hash, [0u8; 16], "hash should still be computed");
+        assert!(entries[0].ast.is_none());
+        assert!(entries[0].content.is_none());
+    }
+
+    #[test]
     fn test_discover_git_cache_is_populated_on_first_run() {
         // Verify the process-level git cache is accessible (not a correctness
         // test of git metadata, just that the cache infrastructure is live).
         let cache = git_cache();
         // The cache is a DashMap — we can read its len without error.
         let _ = cache.len();
-    }
-
-    #[test]
-    fn test_discover_populates_content() {
-        let tmp = TempDir::new().unwrap();
-        let expected = "fn cached() { let x = 42; }";
-        std::fs::write(tmp.path().join("cached.rs"), expected).unwrap();
-
-        let entries = discover_files(&make_opts(tmp.path())).unwrap();
-        assert_eq!(entries.len(), 1);
-        let content = entries[0]
-            .content
-            .as_ref()
-            .expect("content should be populated");
-        assert_eq!(
-            std::str::from_utf8(content).unwrap(),
-            expected,
-            "cached content should match file on disk"
-        );
     }
 }

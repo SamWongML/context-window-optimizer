@@ -120,10 +120,9 @@ pub struct FileEntry {
     /// `None` if near-dedup is disabled or fingerprint was not computed.
     #[serde(default)]
     pub simhash: Option<u64>,
-    /// Cached raw file content from discovery, used by L3 output formatting.
-    /// Populated during `discover_files()` to avoid redundant disk reads.
-    /// Skipped during serialization (ephemeral pipeline data).
-    #[serde(skip)]
+    /// Raw file content, retained for L3 output caching.
+    /// `None` when `retain_content` is false (two-phase memory optimization).
+    #[serde(default, skip_serializing)]
     pub content: Option<Vec<u8>>,
 }
 

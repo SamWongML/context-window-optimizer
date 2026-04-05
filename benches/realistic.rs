@@ -186,12 +186,36 @@ fn bench_focus_vs_no_focus(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark: full pipeline on scale_test_medium(5000).
+/// P3 target: significant improvement over scale_test(5000) due to tight budget.
+fn bench_full_pipeline_medium_files(c: &mut Criterion) {
+    let repo = fixtures::scenarios::scale_test_medium(5_000);
+    let config = Config::default();
+    let budget = Budget::standard(128_000);
+
+    let mut group = c.benchmark_group("full_pipeline");
+    group.sample_size(10);
+    group.bench_function("5k_medium_files", |b| {
+        b.iter(|| {
+            pack_files(
+                black_box(repo.path()),
+                black_box(&budget),
+                black_box(&[]),
+                black_box(&config),
+            )
+            .expect("pack should not fail")
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_discover_10k,
     bench_score_pack_200,
     bench_full_pipeline_medium,
     bench_full_pipeline_large,
+    bench_full_pipeline_medium_files,
     bench_dedup_heavy,
     bench_focus_vs_no_focus,
 );

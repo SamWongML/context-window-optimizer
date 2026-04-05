@@ -62,6 +62,29 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use types::{Budget, PackResult, PackStats};
 
+/// Enrich selected entries with file content and AST data.
+///
+/// Re-reads file bytes from disk (expected to be in OS page cache) and
+/// optionally parses AST for signature extraction.  Called in two-phase
+/// mode after knapsack selection to avoid processing all N files.
+fn enrich_selected(selected: &mut [types::ScoredEntry], max_ast_bytes: usize) {
+    use rayon::prelude::*;
+    selected
+        .par_iter_mut()
+        .for_each(|se| match std::fs::read(&se.entry.path) {
+            Ok(bytes) => {
+                #[cfg(feature = "ast")]
+                if let Some(lang) = se.entry.metadata.language {
+                    se.entry.ast = index::ast::analyze_file(&bytes, lang, max_ast_bytes);
+                }
+                se.entry.content = Some(bytes);
+            }
+            Err(err) => {
+                tracing::warn!("enrich: could not read {}: {err}", se.entry.path.display());
+            }
+        });
+}
+
 /// Run the full optimization pipeline for a repository.
 ///
 /// This is the main entry point for both CLI and MCP usage.
@@ -109,7 +132,18 @@ pub fn pack_files_with_options(
     include_signatures: bool,
 ) -> Result<PackResult, OptimError> {
     let repo = repo.as_ref();
-    let opts = DiscoveryOptions::from_config(config, repo);
+
+    // Two-phase optimization: skip AST and content during discovery when
+    // neither focus_paths (dependency signal) nor signatures (AST in L1)
+    // are needed.  Enrichment happens post-selection for the small set of
+    // chosen files.
+    let use_two_phase = focus_paths.is_empty() && !include_signatures;
+
+    let mut opts = DiscoveryOptions::from_config(config, repo);
+    if use_two_phase {
+        opts.skip_ast = true;
+        opts.retain_content = false;
+    }
 
     // Step 1: Discover
     let files = discover_files(&opts)?;
@@ -119,6 +153,10 @@ pub fn pack_files_with_options(
         "pack: discovered {total_files_scanned} files in {}",
         repo.display()
     );
+
+    if use_two_phase {
+        tracing::info!("pack: using two-phase pipeline (lite discovery, deferred AST+content)");
+    }
 
     // Step 2: Deduplicate by MD5
     let (files, duplicates_removed) = if config.dedup.exact {
@@ -191,14 +229,15 @@ pub fn pack_files_with_options(
         None
     };
 
-    // Preserve the full scored list for L1 (repo skeleton) before knapsack
-    // selection consumes it.  L1 is a map of ALL files, sorted by score.
-    let mut all_scored = scored.clone();
-    all_scored.sort_unstable_by(|a, b| {
+    // Format L1 BEFORE knapsack consumes the scored vec — avoids a full clone.
+    // Sort by score first (L1 skeleton shows all files ranked).
+    let mut scored = scored;
+    scored.sort_unstable_by(|a, b| {
         b.composite_score
             .partial_cmp(&a.composite_score)
             .unwrap_or(Ordering::Equal)
     });
+    let l1_output = format_l1(&scored, include_signatures, budget.l1_tokens());
 
     let result = select_items(
         scored,
@@ -206,7 +245,12 @@ pub fn pack_files_with_options(
         &config.selection.solver,
         diversity_config,
     );
-    let selected = result.selected;
+    let mut selected = result.selected;
+
+    // Two-phase: enrich only the selected files with content + AST
+    if use_two_phase {
+        enrich_selected(&mut selected, config.max_ast_bytes);
+    }
 
     let tokens_used = result.tokens_used;
     let total_tokens_in_files: usize = files.iter().map(|f| f.token_count).sum();
@@ -223,10 +267,8 @@ pub fn pack_files_with_options(
     );
 
     // Step 5: Format outputs
-    // L1 — skeleton map of ALL repo files (sorted by score, truncated to l1 budget).
     // L2 — metadata blocks for the knapsack-SELECTED files only.
     // L3 — full XML-wrapped content for selected files.
-    let l1_output = format_l1(&all_scored, include_signatures, budget.l1_tokens());
     let l2_output = format_l2(&selected);
     let l3_output = format_l3(&selected);
 
@@ -348,4 +390,76 @@ fn load_feedback_context(
     };
 
     (weights, multipliers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_pack_files_two_phase_produces_correct_l3() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for i in 0..5 {
+            std::fs::write(
+                src.join(format!("mod_{i}.rs")),
+                format!("pub fn func_{i}() -> usize {{ {i} }}"),
+            )
+            .unwrap();
+        }
+
+        let config = config::Config::default();
+        let budget = types::Budget::standard(128_000);
+
+        // No focus paths, no signatures → two-phase path
+        let result = pack_files(tmp.path(), &budget, &[], &config).unwrap();
+
+        assert!(result.stats.files_selected > 0);
+        // L3 should contain file content (via enrichment)
+        assert!(
+            result.l3_output.contains("func_"),
+            "L3 should contain enriched file content: {}",
+            &result.l3_output[..result.l3_output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_pack_files_focus_paths_uses_full_pipeline() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        std::fs::write(src.join("main.rs"), "fn main() { lib_fn(); }").unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn lib_fn() {}").unwrap();
+
+        let config = config::Config::default();
+        let budget = types::Budget::standard(128_000);
+        let focus = vec![src.join("main.rs")];
+
+        // With focus paths → full pipeline (not two-phase)
+        let result = pack_files(tmp.path(), &budget, &focus, &config).unwrap();
+
+        assert!(result.stats.files_selected > 0);
+        assert!(result.l3_output.contains("main"));
+    }
+
+    #[test]
+    fn test_pack_files_two_phase_l3_content_matches_disk() {
+        let tmp = TempDir::new().unwrap();
+        let expected = "pub fn exact_match() -> &'static str { \"hello\" }";
+        std::fs::write(tmp.path().join("exact.rs"), expected).unwrap();
+
+        let config = config::Config::default();
+        let budget = types::Budget::standard(128_000);
+
+        let result = pack_files(tmp.path(), &budget, &[], &config).unwrap();
+
+        assert!(
+            result.l3_output.contains("exact_match"),
+            "L3 must contain the file content after enrichment"
+        );
+    }
 }
