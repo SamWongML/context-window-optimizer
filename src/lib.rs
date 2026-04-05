@@ -68,8 +68,10 @@ use types::{Budget, PackResult, PackStats};
 /// optionally parses AST for signature extraction.  Called in two-phase
 /// mode after knapsack selection to avoid processing all N files.
 fn enrich_selected(selected: &mut [types::ScoredEntry], max_ast_bytes: usize) {
-    for se in selected.iter_mut() {
-        match std::fs::read(&se.entry.path) {
+    use rayon::prelude::*;
+    selected
+        .par_iter_mut()
+        .for_each(|se| match std::fs::read(&se.entry.path) {
             Ok(bytes) => {
                 #[cfg(feature = "ast")]
                 if let Some(lang) = se.entry.metadata.language {
@@ -80,8 +82,7 @@ fn enrich_selected(selected: &mut [types::ScoredEntry], max_ast_bytes: usize) {
             Err(err) => {
                 tracing::warn!("enrich: could not read {}: {err}", se.entry.path.display());
             }
-        }
-    }
+        });
 }
 
 /// Run the full optimization pipeline for a repository.
