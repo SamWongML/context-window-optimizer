@@ -9,7 +9,10 @@ use ignore::WalkBuilder;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -282,14 +285,16 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         }
     });
 
-    // ── Phase 1a: serial walk ───────────────────────────────────────────────
-    // Walk the directory tree and read file contents.  Only cheap filtering
-    // (extension, size, binary) is done here.  Expensive per-file work
-    // (tokenization, hashing, AST) is deferred to Phase 1b (parallel).
-    let walker = builder.build();
-    let mut skipped_size = 0usize;
-    let mut skipped_binary = 0usize;
+    // ── Phase 1a: parallel walk ────────────────────────────────────────────
+    // Walk the directory tree using crossbeam work-stealing threads (via the
+    // `ignore` crate's `WalkParallel`).  Each worker thread traverses,
+    // filters, reads content, and pushes RawFile entries into a shared vec.
+    // This parallelizes both directory traversal and file I/O.
+    let walker = builder.build_parallel();
+    let skipped_size = Arc::new(AtomicUsize::new(0));
+    let skipped_binary = Arc::new(AtomicUsize::new(0));
 
+    #[derive(Debug)]
     struct RawFile {
         path: PathBuf,
         size_bytes: u64,
@@ -298,87 +303,112 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         language: Option<Language>,
     }
 
-    let mut raw_files: Vec<RawFile> = Vec::new();
+    let raw_files: Arc<Mutex<Vec<RawFile>>> = Arc::new(Mutex::new(Vec::new()));
 
-    for result in walker {
-        let dir_entry = match result {
-            Ok(e) => e,
-            Err(err) => {
-                tracing::warn!("walk error: {err}");
-                continue;
+    // Capture options for the closure factory
+    let include_extensions = opts.include_extensions.clone();
+    let max_file_bytes = opts.max_file_bytes;
+
+    walker.run(|| {
+        // Per-thread clones of shared state
+        let raw_files = Arc::clone(&raw_files);
+        let skipped_size = Arc::clone(&skipped_size);
+        let skipped_binary = Arc::clone(&skipped_binary);
+        let include_extensions = include_extensions.clone();
+
+        Box::new(move |result| {
+            let dir_entry = match result {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!("walk error: {err}");
+                    return ignore::WalkState::Continue;
+                }
+            };
+
+            // Only process regular files
+            if !dir_entry.file_type().is_some_and(|t| t.is_file()) {
+                return ignore::WalkState::Continue;
             }
-        };
 
-        // Only process regular files
-        if !dir_entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
+            let path = dir_entry.path().to_path_buf();
 
-        let path = dir_entry.path().to_path_buf();
-
-        // Extension filter
-        if !opts.include_extensions.is_empty() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !opts.include_extensions.iter().any(|e| e == ext) {
-                continue;
+            // Extension filter
+            if !include_extensions.is_empty() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !include_extensions.iter().any(|e| e == ext) {
+                    return ignore::WalkState::Continue;
+                }
             }
-        }
 
-        // Size filter
-        let size_bytes = match dir_entry.metadata() {
-            Ok(m) => m.len(),
-            Err(e) => {
-                tracing::warn!("metadata error for {}: {e}", path.display());
-                continue;
+            // Size filter
+            let size_bytes = match dir_entry.metadata() {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    tracing::warn!("metadata error for {}: {e}", path.display());
+                    return ignore::WalkState::Continue;
+                }
+            };
+
+            if size_bytes > max_file_bytes {
+                skipped_size.fetch_add(1, Ordering::Relaxed);
+                tracing::trace!(
+                    "skipping large file: {} ({size_bytes} bytes)",
+                    path.display()
+                );
+                return ignore::WalkState::Continue;
             }
-        };
 
-        if size_bytes > opts.max_file_bytes {
-            skipped_size += 1;
-            tracing::trace!(
-                "skipping large file: {} ({size_bytes} bytes)",
-                path.display()
-            );
-            continue;
-        }
+            // Read content
+            let content = match std::fs::read(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("read error for {}: {e}", path.display());
+                    return ignore::WalkState::Continue;
+                }
+            };
 
-        // Read content
-        let content = match std::fs::read(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("read error for {}: {e}", path.display());
-                continue;
+            // Skip binary files (contains NUL byte)
+            if content.contains(&0u8) {
+                skipped_binary.fetch_add(1, Ordering::Relaxed);
+                tracing::trace!("skipping binary file: {}", path.display());
+                return ignore::WalkState::Continue;
             }
-        };
 
-        // Skip binary files (contains NUL byte)
-        if content.contains(&0u8) {
-            skipped_binary += 1;
-            tracing::trace!("skipping binary file: {}", path.display());
-            continue;
-        }
+            // Language detection (cheap — just extension lookup)
+            let language = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(Language::from_extension);
 
-        // Language detection (cheap — just extension lookup)
-        let language = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(Language::from_extension);
+            // Last modified time
+            let last_modified = dir_entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        // Last modified time
-        let last_modified = dir_entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+            raw_files.lock().unwrap().push(RawFile {
+                path,
+                size_bytes,
+                last_modified,
+                content,
+                language,
+            });
 
-        raw_files.push(RawFile {
-            path,
-            size_bytes,
-            last_modified,
-            content,
-            language,
-        });
-    }
+            ignore::WalkState::Continue
+        })
+    });
+
+    let mut raw_files = Arc::try_unwrap(raw_files)
+        .expect("all walker threads finished")
+        .into_inner()
+        .unwrap();
+
+    // Sort for deterministic output (parallel walk order is non-deterministic)
+    raw_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let skipped_size = skipped_size.load(Ordering::Relaxed);
+    let skipped_binary = skipped_binary.load(Ordering::Relaxed);
 
     tracing::info!(
         "discovery walk: {} files collected, {} skipped (size), {} skipped (binary)",
@@ -939,8 +969,8 @@ mod tests {
         std::fs::write(tmp.path().join("good2.rs"), "fn b() {}").unwrap();
         std::fs::write(tmp.path().join("good3.rs"), "fn c() {}").unwrap();
         // 2 binary files (contain NUL)
-        std::fs::write(tmp.path().join("bin1.dat"), &[0u8, 1, 2]).unwrap();
-        std::fs::write(tmp.path().join("bin2.dat"), &[0u8, 3, 4]).unwrap();
+        std::fs::write(tmp.path().join("bin1.dat"), [0u8, 1, 2]).unwrap();
+        std::fs::write(tmp.path().join("bin2.dat"), [0u8, 3, 4]).unwrap();
 
         let entries = discover_files(&make_opts(tmp.path())).unwrap();
         // Only the 3 .rs files should be discovered (binary skipped)
