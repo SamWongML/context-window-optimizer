@@ -10,9 +10,14 @@ See @Cargo.toml for dependencies and features.
 - Use `?` or `.context("msg")?` for error propagation — `.unwrap()` is only allowed in `#[cfg(test)]` code
 - Use `thiserror` enums in library code (`src/`), `anyhow` only in `src/main.rs`
 
+## Sub-agents
+
+When spawning sub-agents, ensure they have Edit, Bash, and Read permissions. If agents fail due to permission errors, fall back to doing the work directly without retrying agents.
+
 ## Verify Before Done
 
 After any code change, run all three and fix issues before finishing:
+
 ```bash
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings

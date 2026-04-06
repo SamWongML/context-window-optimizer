@@ -93,4 +93,6 @@ desktop.ini
 .claude/settings.local.json
 .claude/worktrees/
 .claude/agent-memory-local/
+.claude/hooks/
 CLAUDE.local.md
+.clippy-last-run
