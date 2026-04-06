@@ -237,7 +237,7 @@ fn batch_git_metadata(repo: &git2::Repository, paths: &[PathBuf]) -> HashMap<Pat
 /// let files = discover_files(&opts).unwrap();
 /// println!("found {} files", files.len());
 /// ```
-/// Intermediate record produced by the serial walk phase before git enrichment.
+/// Intermediate record produced by the parallel walk phase before git enrichment.
 struct WalkRecord {
     path: PathBuf,
     size_bytes: u64,
@@ -340,15 +340,17 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 }
             }
 
-            // Size filter
-            let size_bytes = match dir_entry.metadata() {
-                Ok(m) => m.len(),
+            // Metadata (single stat() call — reused for size + last_modified)
+            let metadata = match dir_entry.metadata() {
+                Ok(m) => m,
                 Err(e) => {
                     tracing::warn!("metadata error for {}: {e}", path.display());
                     return ignore::WalkState::Continue;
                 }
             };
 
+            // Size filter
+            let size_bytes = metadata.len();
             if size_bytes > max_file_bytes {
                 skipped_size.fetch_add(1, Ordering::Relaxed);
                 tracing::trace!(
@@ -380,12 +382,8 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 .and_then(|e| e.to_str())
                 .and_then(Language::from_extension);
 
-            // Last modified time
-            let last_modified = dir_entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+            // Last modified time (reuse metadata from above)
+            let last_modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
             raw_files.lock().unwrap().push(RawFile {
                 path,
