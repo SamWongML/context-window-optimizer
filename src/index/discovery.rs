@@ -883,4 +883,67 @@ mod tests {
         // The cache is a DashMap — we can read its len without error.
         let _ = cache.len();
     }
+
+    #[test]
+    fn test_discover_returns_sorted_paths() {
+        let tmp = TempDir::new().unwrap();
+        // Create files in reverse alphabetical order to catch ordering issues
+        for name in ["z.rs", "m.rs", "a.rs", "f.rs", "b.rs"] {
+            std::fs::write(tmp.path().join(name), format!("fn {name}() {{}}")).unwrap();
+        }
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 5);
+
+        let paths: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        let mut sorted = paths.clone();
+        sorted.sort();
+        assert_eq!(paths, sorted, "entries should be sorted by path");
+    }
+
+    #[test]
+    fn test_discover_no_duplicates_with_nested_dirs() {
+        let tmp = TempDir::new().unwrap();
+        // Create a deep directory structure — parallel walkers could visit entries twice
+        // if work-stealing boundaries overlap.
+        for i in 0..5 {
+            let dir = tmp.path().join(format!("level_{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for j in 0..3 {
+                std::fs::write(
+                    dir.join(format!("file_{j}.rs")),
+                    format!("fn f_{i}_{j}() {{}}"),
+                )
+                .unwrap();
+            }
+        }
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 15);
+
+        // Check no duplicates
+        let mut paths: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 15, "no duplicate paths should be returned");
+    }
+
+    #[test]
+    fn test_discover_skip_counts_are_accurate() {
+        let tmp = TempDir::new().unwrap();
+        // 3 valid files
+        std::fs::write(tmp.path().join("good1.rs"), "fn a() {}").unwrap();
+        std::fs::write(tmp.path().join("good2.rs"), "fn b() {}").unwrap();
+        std::fs::write(tmp.path().join("good3.rs"), "fn c() {}").unwrap();
+        // 2 binary files (contain NUL)
+        std::fs::write(tmp.path().join("bin1.dat"), &[0u8, 1, 2]).unwrap();
+        std::fs::write(tmp.path().join("bin2.dat"), &[0u8, 3, 4]).unwrap();
+
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        // Only the 3 .rs files should be discovered (binary skipped)
+        assert_eq!(entries.len(), 3, "should discover exactly 3 text files");
+    }
 }
