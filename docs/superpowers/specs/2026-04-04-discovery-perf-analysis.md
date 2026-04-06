@@ -1,12 +1,12 @@
-# Discovery Performance Analysis & Improvement Plan (v6)
+# Discovery Performance Analysis & Improvement Plan (v7)
 
-**Date**: 2026-04-05 (updated with P3 results)
-**Status**: P0+P1+P2+P2b+P3 implemented. 10K discovery target met. tiktoken-rs eliminated. Two-phase pipeline with lazy AST and content caching live. Full pipeline optimization ongoing.
+**Date**: 2026-04-06 (updated with P4 results)
+**Status**: P0+P1+P2+P2b+P3+P4 implemented. 10K discovery target met. tiktoken-rs eliminated. Two-phase pipeline with lazy AST and content caching live. Parallel walk via WalkParallel live. Full pipeline optimization ongoing.
 
-## Current Architecture (post-P0+P1+P2+P2b+P3)
+## Current Architecture (post-P0+P1+P2+P2b+P3+P4)
 
 ```
-Phase 1a (serial):   Walk + read + filter           ~fast (ignore crate)
+Phase 1a (parallel): Walk + read + filter           ~fast (ignore crate WalkParallel)
 Phase 1b (parallel): estimate_tokens + hash + [AST]  ~dominant cost (rayon)
                      (thread-local parser/query cache, byte-class token estimator)
                      Exact counts: bpe-openai cl100k (zero-alloc, static tables)
@@ -22,15 +22,15 @@ L3 formatting:       Uses cached content from enrich  ~zero re-reads
 
 ## Benchmark Results (cumulative)
 
-| Benchmark | Baseline | P0 | P1 | P2 | P2b | P3 | Target |
-|---|---|---|---|---|---|---|---|
-| discover/10k | 28.9s | 4.85s | 381ms | 316ms | 341ms | **320ms** | < 500ms |
-| full_pipeline/100 | — | — | — | — | ~8ms | **4.8ms** | — |
-| full_pipeline/400 | — | 126ms | 54ms | 14ms | 14.5ms | **12.8ms** | < 100ms |
-| full_pipeline/1000 | — | — | — | — | ~121ms | **83ms** | — |
-| full_pipeline/5k | — | — | 806ms | 812ms | 826ms | **800ms** | — |
-| full_pipeline/5k_medium | — | — | — | — | — | **809ms** | — |
-| score_pack/200 | 214µs | 214µs | 219µs | 221µs | 222µs | **256µs** | < 50ms |
+| Benchmark | Baseline | P0 | P1 | P2 | P2b | P3 | P4 | Target |
+|---|---|---|---|---|---|---|---|---|
+| discover/10k | 28.9s | 4.85s | 381ms | 316ms | 341ms | 320ms | **195ms** | < 500ms |
+| full_pipeline/100 | — | — | — | — | ~8ms | **4.8ms** | — | — |
+| full_pipeline/400 | — | 126ms | 54ms | 14ms | 14.5ms | 12.8ms | **12.6ms** | < 100ms |
+| full_pipeline/1000 | — | — | — | — | ~121ms | **83ms** | — | — |
+| full_pipeline/5k | — | — | 806ms | 812ms | 826ms | 800ms | **768ms** | — |
+| full_pipeline/5k_medium | — | — | — | — | — | 809ms | **777ms** | — |
+| score_pack/200 | 214µs | 214µs | 219µs | 221µs | 222µs | **256µs** | — | < 50ms |
 
 ### P3 Analysis: Where the improvement comes from
 
@@ -226,10 +226,12 @@ Key results:
 
 Impact scales with file count and budget tightness. The 1000-file pipeline shows the largest relative improvement because clone overhead is a large fraction of total cost at that scale.
 
-### P4: Parallel directory walking (est. 30% on Phase 1a)
-**Expected: 500ms → ~300ms for Phase 1a**
+### P4 (DONE): Parallel directory walking
+**Result: 320ms → 195ms discovery (-39%). 5K pipeline: 800ms → 768ms (-4%).**
 
-Switch from `WalkBuilder::build()` to `WalkBuilder::build_parallel()`. Most impactful when combined with P3 (filter during walk).
+Switched from `WalkBuilder::build()` to `WalkBuilder::build_parallel()`. Uses crossbeam work-stealing thread pool for concurrent directory traversal + file I/O. Results collected via `Arc<Mutex<Vec<RawFile>>>`, sorted by path for deterministic output. Single `metadata()` call per file (review fix: eliminated redundant stat() syscall). Phase 1b (rayon) and Phase 2 (git) unchanged.
+
+The 39% improvement on discovery (vs. expected 30%) comes from parallelizing both directory traversal AND file reads — on NVMe/APFS, concurrent reads benefit from OS prefetching and don't contend.
 
 ### P5: Persistent on-disk cache (instant repeat calls)
 **Expected: ~50ms for unchanged repos**
@@ -243,15 +245,15 @@ Switch from `WalkBuilder::build()` to `WalkBuilder::build_parallel()`. Most impa
 | P1 (parser/query reuse) | 381ms | 806ms | |
 | P2 (fast token estimation) | 316ms | 812ms | 5K bottleneck is post-discovery |
 | P2b (bpe-openai exact) | 341ms | 826ms | Perf-neutral; eliminates tiktoken-rs |
-| **P3 (two-phase + caching)** | **320ms** | **800ms** | 1K: 83ms (-31%); 400: 12.8ms (-12%) |
-| + P4 (parallel walk) | ~200ms | ~600ms | |
+| P3 (two-phase + caching) | 320ms | 800ms | 1K: 83ms (-31%); 400: 12.8ms (-12%) |
+| **P4 (parallel walk)** | **195ms** | **768ms** | -39% discover; -4% pipeline |
 | + P5 (disk cache, repeat) | ~50ms | ~50ms | |
 
 ## Implementation Priority (revised)
 
 1. ~~**P2b** (bpe-openai)~~ — DONE
 2. ~~**P3** (two-phase scoring + content caching)~~ — DONE
-3. **P4** (parallel walk) — moderate impact, API change
+3. ~~**P4** (parallel walk)~~ — DONE (-39% discovery, exceeded 30% target)
 4. **P5** (disk cache) — transformative for repeat calls, new subsystem
 
 ## Sources
