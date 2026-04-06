@@ -1,18 +1,24 @@
-# Discovery Performance Analysis & Improvement Plan (v7)
+# Discovery Performance Analysis & Improvement Plan (v8)
 
-**Date**: 2026-04-06 (updated with P4 results)
-**Status**: P0+P1+P2+P2b+P3+P4 implemented. 10K discovery target met. tiktoken-rs eliminated. Two-phase pipeline with lazy AST and content caching live. Parallel walk via WalkParallel live. Full pipeline optimization ongoing.
+**Date**: 2026-04-06 (updated with P5 results)
+**Status**: P0+P1+P2+P2b+P3+P4+P5 implemented. 10K discovery target met. tiktoken-rs eliminated. Two-phase pipeline with lazy AST and content caching live. Parallel walk via WalkParallel live. Persistent on-disk discovery cache live — warm runs hit ~52ms (4x speedup over cold).
 
-## Current Architecture (post-P0+P1+P2+P2b+P3+P4)
+## Current Architecture (post-P0+P1+P2+P2b+P3+P4+P5)
 
 ```
+Phase 0  (serial):   Load .ctx-optim/cache/discovery.json  ~25ms for 10K (P5)
+                     Empty manifest if missing/version/config_hash/repo_root mismatch
 Phase 1a (parallel): Walk + read + filter           ~fast (ignore crate WalkParallel)
+                     Cache hit (mtime+size match)  → skip read, push cached FileEntry
+                     Cache miss / changed file     → fall through to read+process
 Phase 1b (parallel): estimate_tokens + hash + [AST]  ~dominant cost (rayon)
                      (thread-local parser/query cache, byte-class token estimator)
                      Exact counts: bpe-openai cl100k (zero-alloc, static tables)
                      AST skipped in two-phase mode (no focus_paths)
+                     SKIPPED ENTIRELY when raw_files.is_empty() (P5 fast path)
 Phase 2  (serial):   Batch git metadata              ~fast (single revwalk)
-Phase 3  (serial):   Assemble FileEntry vec           ~trivial
+                     SKIPPED ENTIRELY when raw_files.is_empty() (P5 fast path)
+Phase 3  (serial):   Merge cache hits + fresh entries; sort by path; persist cache
 Scoring  (parallel): Cheap score (no dep signal)     ~fast (lightweight FileEntry)
 Selection:           Greedy knapsack                 ~trivial
 Enrichment (parallel): Re-read + AST for selected    ~K files only (rayon)
@@ -22,15 +28,20 @@ L3 formatting:       Uses cached content from enrich  ~zero re-reads
 
 ## Benchmark Results (cumulative)
 
-| Benchmark | Baseline | P0 | P1 | P2 | P2b | P3 | P4 | Target |
-|---|---|---|---|---|---|---|---|---|
-| discover/10k | 28.9s | 4.85s | 381ms | 316ms | 341ms | 320ms | **195ms** | < 500ms |
-| full_pipeline/100 | — | — | — | — | ~8ms | **4.8ms** | — | — |
-| full_pipeline/400 | — | 126ms | 54ms | 14ms | 14.5ms | 12.8ms | **12.6ms** | < 100ms |
-| full_pipeline/1000 | — | — | — | — | ~121ms | **83ms** | — | — |
-| full_pipeline/5k | — | — | 806ms | 812ms | 826ms | 800ms | **768ms** | — |
-| full_pipeline/5k_medium | — | — | — | — | — | 809ms | **777ms** | — |
-| score_pack/200 | 214µs | 214µs | 219µs | 221µs | 222µs | **256µs** | — | < 50ms |
+| Benchmark | Baseline | P0 | P1 | P2 | P2b | P3 | P4 | P5 | Target |
+|---|---|---|---|---|---|---|---|---|---|
+| discover/10k (cold) | 28.9s | 4.85s | 381ms | 316ms | 341ms | 320ms | 195ms | **200ms** | < 500ms |
+| **discover/10k (warm)** | — | — | — | — | — | — | — | **52ms** | ~50ms |
+| full_pipeline/100 | — | — | — | — | ~8ms | **4.8ms** | — | — | — |
+| full_pipeline/400 | — | 126ms | 54ms | 14ms | 14.5ms | 12.8ms | **12.6ms** | — | < 100ms |
+| full_pipeline/1000 | — | — | — | — | ~121ms | **83ms** | — | — | — |
+| full_pipeline/5k | — | — | 806ms | 812ms | 826ms | 800ms | **768ms** | — | — |
+| full_pipeline/5k_medium | — | — | — | — | — | 809ms | **777ms** | — | — |
+| score_pack/200 | 214µs | 214µs | 219µs | 221µs | 222µs | **256µs** | — | — | < 50ms |
+
+P5 cold path adds ~5ms overhead (cache file open, version check) over P4. The warm
+path is **3.8x faster than cold** and meets the ~50ms target. On a fully unchanged
+repo, Phase 1b and Phase 2 are skipped entirely — only the parallel walk runs.
 
 ### P3 Analysis: Where the improvement comes from
 
@@ -233,8 +244,29 @@ Switched from `WalkBuilder::build()` to `WalkBuilder::build_parallel()`. Uses cr
 
 The 39% improvement on discovery (vs. expected 30%) comes from parallelizing both directory traversal AND file reads — on NVMe/APFS, concurrent reads benefit from OS prefetching and don't contend.
 
-### P5: Persistent on-disk cache (instant repeat calls)
-**Expected: ~50ms for unchanged repos**
+### P5 (DONE): Persistent on-disk discovery cache
+
+**Result: warm 10K discovery = 52ms (3.8x speedup over cold). Target met.**
+
+What changed:
+- New module `src/index/cache.rs` with `CacheManifest` (~220 LoC + 24 unit tests)
+- Cache file at `<repo>/.ctx-optim/cache/discovery.json`
+- Reuses `FileEntry` directly (relies on existing `#[serde(skip_serializing)]` on `content`) — no parallel `CachedFile` struct
+- Per-file cache key: `(rel_path, mtime_secs, size_bytes)` — stricter than the in-memory `GIT_CACHE`
+- Repo-level invalidation via `config_hash: u64` over discovery-relevant `DiscoveryOptions` fields (`SipHasher13` with fixed keys, length-prefixed strings to avoid collisions, `retain_content` excluded)
+- Schema version `CACHE_VERSION: u32 = 1` — bump on `FileEntry`/`FileMetadata`/`GitMetadata`/`AstData`/`Signature`/`ImportRef`/`Language`/`SymbolKind` changes
+- Repo-moved detection via stored `repo_root`
+- Atomic write via tmp+rename, errors logged at `warn` level (best-effort)
+- All-cache-hit fast path: `discover_files()` returns sorted hits without ever entering Phase 1b/2
+- 11 new integration tests (writes/reuses/invalidation by mtime/deletion/addition/config/two-phase/corrupted/partial-walk) plus the critical `test_discover_cache_results_match_uncached` correctness invariant
+
+**Format choice — JSON over bincode:** JSON keeps the cache `cat`-able for debugging, adds zero new dependencies (`serde_json` already in tree), and parses ~150-250 MB/s on M-series → ~25ms for the ~4MB 10K manifest. Bincode would save only ~10ms (paths dominate the size and serialize at the same speed in both formats); not worth the opacity tradeoff.
+
+**Walker fix:** the `filter_entry` closure now unconditionally skips `.ctx-optim/`. Without this, the cache file written by run N would be discovered as a regular text file by run N+1 (it has no NUL bytes). The directory holds tool state (cache + feedback DB) and is never source code.
+
+**Bench fix:** `bench_discover_10k` was hoisting the temp dir outside `iter()`. After P5 ships, the first iter writes a cache and silently corrupts the cold-path measurement. Fixed with `iter_batched` that deletes `<repo>/.ctx-optim/cache/discovery.json` before each iter. New `bench_discover_10k_warm` primes the cache once before the loop and measures the all-hit fast path.
+
+**Known limitation — git metadata staleness:** `GitMetadata.age_days` is computed from `now - latest_commit_secs` at write time, so cache hits return age_days that's stale by however long ago the cache was written. This matches the existing in-memory `GIT_CACHE` behavior (which also caches `GitMetadata` keyed on mtime). The recency signal has smooth decay so a few days of drift is tolerable. Users can `rm .ctx-optim/cache/discovery.json` to refresh. v2 could store `latest_commit_secs` and recompute on load, but it requires changing the return type of `batch_git_metadata()`.
 
 ## Revised Projected Performance Stack
 
@@ -246,15 +278,16 @@ The 39% improvement on discovery (vs. expected 30%) comes from parallelizing bot
 | P2 (fast token estimation) | 316ms | 812ms | 5K bottleneck is post-discovery |
 | P2b (bpe-openai exact) | 341ms | 826ms | Perf-neutral; eliminates tiktoken-rs |
 | P3 (two-phase + caching) | 320ms | 800ms | 1K: 83ms (-31%); 400: 12.8ms (-12%) |
-| **P4 (parallel walk)** | **195ms** | **768ms** | -39% discover; -4% pipeline |
-| + P5 (disk cache, repeat) | ~50ms | ~50ms | |
+| P4 (parallel walk) | 195ms | 768ms | -39% discover; -4% pipeline |
+| **P5 (disk cache, cold)** | **200ms** | **~770ms** | +5ms vs P4 (cache load overhead) |
+| **P5 (disk cache, warm)** | **52ms** | ~600ms | -73% on warm discover; fast path skips Phase 1b/2 |
 
 ## Implementation Priority (revised)
 
 1. ~~**P2b** (bpe-openai)~~ — DONE
 2. ~~**P3** (two-phase scoring + content caching)~~ — DONE
 3. ~~**P4** (parallel walk)~~ — DONE (-39% discovery, exceeded 30% target)
-4. **P5** (disk cache) — transformative for repeat calls, new subsystem
+4. ~~**P5** (disk cache)~~ — DONE (warm = 52ms, target met; 3.8x speedup over cold)
 
 ## Sources
 
