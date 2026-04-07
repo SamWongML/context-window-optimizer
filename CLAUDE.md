@@ -32,6 +32,8 @@ cargo build --release --features full                          # Release (mcp+as
 cargo nextest run --all-features                               # Tests (use nextest, not cargo test)
 cargo bench                                                    # Criterion benchmarks in benches/
 RUST_LOG=debug cargo run -- pack --budget 128000 --repo .      # Run CLI
+cargo run --features mcp -- serve                              # Start MCP stdio server
+cargo run --features feedback -- feedback weights              # feedback/watch subcommands need their feature flag
 ```
 
 ## Architecture
