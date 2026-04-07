@@ -1,7 +1,12 @@
 use crate::{
     config::Config,
     error::OptimError,
-    index::{dedup::md5_hash, simhash::simhash_fingerprint, tokenizer::estimate_tokens_bytes},
+    index::{
+        cache::{self, CacheManifest},
+        dedup::md5_hash,
+        simhash::simhash_fingerprint,
+        tokenizer::estimate_tokens_bytes,
+    },
     types::{FileEntry, FileMetadata, GitMetadata, Language},
 };
 use dashmap::DashMap;
@@ -264,6 +269,16 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         tracing::debug!("no git repository, skipping git metadata");
     }
 
+    // ── P5: load persistent on-disk discovery cache ────────────────────────
+    // Loaded once before the walk and shared (read-only) with all worker
+    // threads via Arc.  Lookup is keyed on absolute path so the walker's
+    // `dir_entry.path()` matches without per-lookup transformation.
+    let cfg_hash = cache::config_hash(opts);
+    let cached_lookup: Arc<HashMap<PathBuf, FileEntry>> =
+        Arc::new(CacheManifest::load(&opts.root, cfg_hash).into_lookup());
+    let initial_cache_size = cached_lookup.len();
+    tracing::debug!("discovery cache: {initial_cache_size} entries loaded");
+
     let mut builder = WalkBuilder::new(&opts.root);
     builder
         .hidden(false) // include dot-files that aren't ignored
@@ -276,9 +291,16 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
     // NOTE: WalkBuilder::add_ignore() expects a path to an ignore-rules FILE,
     // not a bare name — using it with directory names like ".git" silently does
     // nothing.  filter_entry() is the correct API for excluding paths by name.
+    //
+    // We unconditionally skip `.ctx-optim` (our own state directory holding
+    // the discovery cache and feedback DB) regardless of user config — it's
+    // never source code and should never be indexed.
     let extra_ignores = opts.extra_ignore.clone();
     builder.filter_entry(move |e| {
         if let Some(name) = e.path().file_name() {
+            if name == std::ffi::OsStr::new(".ctx-optim") {
+                return false;
+            }
             !extra_ignores.iter().any(|p| p.as_os_str() == name)
         } else {
             true
@@ -304,6 +326,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
     }
 
     let raw_files: Arc<Mutex<Vec<RawFile>>> = Arc::new(Mutex::new(Vec::new()));
+    let cache_hits: Arc<Mutex<Vec<FileEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Capture options for the closure factory
     let include_extensions = opts.include_extensions.clone();
@@ -312,6 +335,8 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
     walker.run(|| {
         // Per-thread clones of shared state
         let raw_files = Arc::clone(&raw_files);
+        let cache_hits = Arc::clone(&cache_hits);
+        let cached_lookup = Arc::clone(&cached_lookup);
         let skipped_size = Arc::clone(&skipped_size);
         let skipped_binary = Arc::clone(&skipped_binary);
         let include_extensions = include_extensions.clone();
@@ -340,7 +365,8 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 }
             }
 
-            // Metadata (single stat() call — reused for size + last_modified)
+            // Metadata (single stat() call — reused for size + last_modified
+            // + cache key)
             let metadata = match dir_entry.metadata() {
                 Ok(m) => m,
                 Err(e) => {
@@ -349,8 +375,35 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
                 }
             };
 
-            // Size filter
             let size_bytes = metadata.len();
+            let mtime_secs = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            // ── P5 cache lookup ────────────────────────────────────────────
+            // Check the on-disk cache BEFORE size filter and content read.
+            // If (path, mtime_secs, size_bytes) matches a cached entry, push
+            // the cached FileEntry directly and skip read+tokenize+hash+ast+git.
+            // Mtime+size match proves the content hasn't changed since the
+            // file was originally classified, so the binary-NUL check stays
+            // valid.
+            if let Some(cached) = cached_lookup.get(&path) {
+                let cached_mtime = cached
+                    .metadata
+                    .last_modified
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if cached_mtime == mtime_secs && cached.metadata.size_bytes == size_bytes {
+                    cache_hits.lock().unwrap().push(cached.clone());
+                    return ignore::WalkState::Continue;
+                }
+            }
+
+            // Size filter
             if size_bytes > max_file_bytes {
                 skipped_size.fetch_add(1, Ordering::Relaxed);
                 tracing::trace!(
@@ -401,6 +454,10 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         .expect("all walker threads finished")
         .into_inner()
         .unwrap();
+    let mut cache_hits = Arc::try_unwrap(cache_hits)
+        .expect("all walker threads finished")
+        .into_inner()
+        .unwrap();
 
     // Sort for deterministic output (parallel walk order is non-deterministic)
     raw_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -409,16 +466,31 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
     let skipped_binary = skipped_binary.load(Ordering::Relaxed);
 
     tracing::info!(
-        "discovery walk: {} files collected, {} skipped (size), {} skipped (binary)",
+        "discovery walk: {} files ({} cache hits, {} fresh), {} skipped (size), {} skipped (binary)",
+        raw_files.len() + cache_hits.len(),
+        cache_hits.len(),
         raw_files.len(),
         skipped_size,
         skipped_binary
     );
 
-    if raw_files.is_empty() {
+    if raw_files.is_empty() && cache_hits.is_empty() {
         return Err(OptimError::EmptyRepo {
             path: opts.root.display().to_string(),
         });
+    }
+
+    // ── P5 fast path: every walked file was cached ──────────────────────────
+    // Skip Phase 1b (tokenize/hash/AST/SimHash) and Phase 2 (git revwalk)
+    // entirely.  Cached entries already carry their git metadata.  Only
+    // rewrite the manifest if files were deleted (cache_hits.len() drops
+    // below the original cache size).
+    if raw_files.is_empty() {
+        cache_hits.sort_by(|a, b| a.path.cmp(&b.path));
+        if cache_hits.len() != initial_cache_size {
+            CacheManifest::from_entries(&cache_hits, &opts.root, cfg_hash).save(&opts.root);
+        }
+        return Ok(cache_hits);
     }
 
     // ── Phase 1b: parallel processing ───────────────────────────────────────
@@ -535,7 +607,7 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
         }
     }
 
-    let entries: Vec<FileEntry> = records
+    let fresh_entries: Vec<FileEntry> = records
         .into_iter()
         .zip(git_metadata_vec)
         .map(|(rec, git)| FileEntry {
@@ -553,6 +625,16 @@ pub fn discover_files(opts: &DiscoveryOptions) -> Result<Vec<FileEntry>, OptimEr
             content: rec.content,
         })
         .collect();
+
+    // ── P5 slow path: merge cache hits with fresh entries, save manifest ────
+    // Cache hits are returned with `content: None` (cached entries never
+    // carry content).  Sort by path for deterministic output.  Persist the
+    // updated manifest so subsequent runs hit the warm path.
+    let mut entries: Vec<FileEntry> = fresh_entries;
+    entries.extend(cache_hits);
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+
+    CacheManifest::from_entries(&entries, &opts.root, cfg_hash).save(&opts.root);
 
     Ok(entries)
 }
@@ -973,5 +1055,312 @@ mod tests {
         let entries = discover_files(&make_opts(tmp.path())).unwrap();
         // Only the 3 .rs files should be discovered (binary skipped)
         assert_eq!(entries.len(), 3, "should discover exactly 3 text files");
+    }
+
+    // ── P5: persistent on-disk cache integration tests ──────────────────────
+
+    /// Bump the mtime of `path` by `secs` seconds (works on macOS/Linux).
+    /// Returns the new mtime as `SystemTime`.
+    fn bump_mtime(path: &Path, secs_offset: i64) -> SystemTime {
+        let new_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + secs_offset;
+        let new_time = UNIX_EPOCH + std::time::Duration::from_secs(new_secs as u64);
+
+        // Use libc's utimes via filesystem-level syscall — std doesn't expose
+        // this directly, so we shell out to `touch -t`.  Format is
+        // YYYYMMDDhhmm.SS in local time.
+        let dt = chrono_format(new_secs);
+        let _ = std::process::Command::new("touch")
+            .arg("-t")
+            .arg(&dt)
+            .arg(path)
+            .status();
+        new_time
+    }
+
+    /// Format a unix timestamp (UTC) as `YYYYMMDDhhmm.SS` for `touch -t`.
+    /// Pure-Rust to avoid pulling in chrono just for tests.
+    fn chrono_format(secs: i64) -> String {
+        let days = secs / 86_400;
+        let rem = secs % 86_400;
+        let hours = rem / 3600;
+        let minutes = (rem % 3600) / 60;
+        let seconds = rem % 60;
+
+        // Civil-from-days algorithm (Howard Hinnant, public domain)
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        format!("{y:04}{m:02}{d:02}{hours:02}{minutes:02}.{seconds:02}")
+    }
+
+    #[test]
+    fn test_discover_writes_cache_on_first_run() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+
+        let _ = discover_files(&make_opts(tmp.path())).unwrap();
+
+        let cache_path = crate::index::cache::CacheManifest::cache_path(tmp.path());
+        assert!(
+            cache_path.exists(),
+            "cache file should be written after first discovery"
+        );
+    }
+
+    #[test]
+    fn test_discover_uses_cache_on_second_run() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}").unwrap();
+
+        // First run — populates cache
+        let entries1 = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries1.len(), 2);
+
+        // Capture cache file mtime
+        let cache_path = crate::index::cache::CacheManifest::cache_path(tmp.path());
+        let mtime1 = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
+
+        // Sleep enough to detect a rewrite via mtime delta
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Second run — every file is a cache hit, no fresh files, no deletions
+        // → manifest should NOT be rewritten
+        let entries2 = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries2.len(), 2);
+
+        let mtime2 = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime1, mtime2,
+            "manifest should not be rewritten when nothing changed"
+        );
+    }
+
+    #[test]
+    fn test_discover_cache_invalidation_on_file_modification() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("a.rs");
+        std::fs::write(&file, "fn a() {}").unwrap();
+
+        let entries1 = discover_files(&make_opts(tmp.path())).unwrap();
+        let hash1 = entries1[0].hash;
+
+        // Bump mtime backwards by 10 seconds to guarantee a different mtime_secs,
+        // then rewrite content with a different hash.
+        bump_mtime(&file, -10);
+        std::fs::write(&file, "fn b() { let x = 42; }").unwrap();
+
+        let entries2 = discover_files(&make_opts(tmp.path())).unwrap();
+        let hash2 = entries2[0].hash;
+
+        assert_ne!(
+            hash1, hash2,
+            "modified file should produce a different hash on the second run"
+        );
+    }
+
+    #[test]
+    fn test_discover_cache_invalidation_on_file_deletion() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}").unwrap();
+
+        let entries1 = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries1.len(), 2);
+
+        std::fs::remove_file(tmp.path().join("b.rs")).unwrap();
+
+        let entries2 = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries2.len(), 1);
+        assert_eq!(entries2[0].path.file_name().unwrap(), "a.rs");
+
+        // Verify the manifest on disk no longer contains b.rs
+        let cfg_hash = crate::index::cache::config_hash(&make_opts(tmp.path()));
+        let manifest = crate::index::cache::CacheManifest::load(tmp.path(), cfg_hash);
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn test_discover_cache_invalidation_on_file_addition() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+
+        let entries1 = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries1.len(), 1);
+
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}").unwrap();
+
+        let entries2 = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries2.len(), 2);
+
+        // Verify both are now in the manifest
+        let cfg_hash = crate::index::cache::config_hash(&make_opts(tmp.path()));
+        let manifest = crate::index::cache::CacheManifest::load(tmp.path(), cfg_hash);
+        assert_eq!(manifest.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_discover_cache_invalidation_on_config_change() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+
+        // First run with default opts
+        let _ = discover_files(&make_opts(tmp.path())).unwrap();
+
+        // Second run with a different max_file_bytes — should produce a different
+        // config_hash and thus invalidate the cache.
+        let opts2 = DiscoveryOptions {
+            max_file_bytes: 1, // smaller than the file → should be excluded
+            ..make_opts(tmp.path())
+        };
+        let result = discover_files(&opts2);
+        assert!(matches!(result, Err(OptimError::EmptyRepo { .. })));
+    }
+
+    #[test]
+    fn test_discover_cache_results_match_uncached() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..5 {
+            std::fs::write(
+                tmp.path().join(format!("mod_{i}.rs")),
+                format!("pub fn func_{i}() -> usize {{ {i} * 2 }}"),
+            )
+            .unwrap();
+        }
+
+        // First run (cold)
+        let cold = discover_files(&make_opts(tmp.path())).unwrap();
+
+        // Verify cache exists
+        let cache_path = crate::index::cache::CacheManifest::cache_path(tmp.path());
+        assert!(cache_path.exists());
+
+        // Second run (warm)
+        let warm = discover_files(&make_opts(tmp.path())).unwrap();
+
+        assert_eq!(cold.len(), warm.len(), "cold and warm should yield same N");
+
+        // Compare on the structurally-stable fields.  `last_modified` and git
+        // metadata can drift across calls (now() advances), so compare on
+        // path, hash, token_count, size_bytes, language, ast, simhash.
+        for (c, w) in cold.iter().zip(warm.iter()) {
+            assert_eq!(c.path, w.path, "path mismatch");
+            assert_eq!(c.hash, w.hash, "hash mismatch for {}", c.path.display());
+            assert_eq!(
+                c.token_count,
+                w.token_count,
+                "token_count mismatch for {}",
+                c.path.display()
+            );
+            assert_eq!(
+                c.metadata.size_bytes,
+                w.metadata.size_bytes,
+                "size_bytes mismatch for {}",
+                c.path.display()
+            );
+            assert_eq!(
+                c.metadata.language,
+                w.metadata.language,
+                "language mismatch for {}",
+                c.path.display()
+            );
+            assert_eq!(
+                c.simhash,
+                w.simhash,
+                "simhash mismatch for {}",
+                c.path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_discover_cache_with_two_phase_mode() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "pub fn a() -> usize { 42 }").unwrap();
+
+        let opts = DiscoveryOptions {
+            skip_ast: true,
+            retain_content: false,
+            ..make_opts(tmp.path())
+        };
+
+        // Cold run — populates cache
+        let entries1 = discover_files(&opts).unwrap();
+        assert_eq!(entries1.len(), 1);
+        assert!(entries1[0].ast.is_none());
+
+        // Warm run — cache hit, AST should still be None
+        let entries2 = discover_files(&opts).unwrap();
+        assert_eq!(entries2.len(), 1);
+        assert!(
+            entries2[0].ast.is_none(),
+            "AST must remain None when skip_ast is set, even on cache hit"
+        );
+    }
+
+    #[test]
+    fn test_discover_handles_corrupted_cache_gracefully() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+
+        // Pre-create a corrupted cache file
+        let cache_path = crate::index::cache::CacheManifest::cache_path(tmp.path());
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, b"{ this is garbage }").unwrap();
+
+        // Discovery should succeed and overwrite the corrupted cache
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // The cache file should now be valid JSON
+        let bytes = std::fs::read(&cache_path).unwrap();
+        let _: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("cache file should be valid JSON after rewrite");
+    }
+
+    #[test]
+    fn test_discover_cache_partial_walk_drops_missing_entries() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}").unwrap();
+        std::fs::write(tmp.path().join("c.rs"), "fn c() {}").unwrap();
+
+        // First run — 3 files cached
+        let _ = discover_files(&make_opts(tmp.path())).unwrap();
+
+        // Delete one file
+        std::fs::remove_file(tmp.path().join("b.rs")).unwrap();
+
+        // Second run — manifest should drop b.rs
+        let entries = discover_files(&make_opts(tmp.path())).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let cfg_hash = crate::index::cache::config_hash(&make_opts(tmp.path()));
+        let manifest = crate::index::cache::CacheManifest::load(tmp.path(), cfg_hash);
+        assert_eq!(
+            manifest.entries.len(),
+            2,
+            "manifest should be rewritten without b.rs"
+        );
+        let names: Vec<String> = manifest
+            .entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"a.rs".to_string()));
+        assert!(names.contains(&"c.rs".to_string()));
+        assert!(!names.contains(&"b.rs".to_string()));
     }
 }

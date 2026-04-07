@@ -19,8 +19,13 @@ use ctx_optim::{
     types::Budget,
 };
 
-/// Benchmark: full pipeline on the scale_test(10_000) scenario.
-/// Target: < 500ms for discovery; < 100ms total for score+pack on pre-discovered files.
+/// Benchmark: cold discovery on the scale_test(10_000) scenario.
+/// Target: < 500ms for discovery (CLAUDE.md target); ~195ms after P4.
+///
+/// IMPORTANT: P5 introduced an on-disk cache at `.ctx-optim/cache/discovery.json`.
+/// We must delete it before each iteration to keep this benchmark measuring cold
+/// performance — otherwise after the first iter the cache would be warm and the
+/// benchmark would silently start measuring warm-cache speed instead.
 fn bench_discover_10k(c: &mut Criterion) {
     let repo = fixtures::scenarios::scale_test(10_000);
     let config = Config::default();
@@ -29,7 +34,36 @@ fn bench_discover_10k(c: &mut Criterion) {
     let mut group = c.benchmark_group("discover");
     group.sample_size(10); // expensive setup
     group.bench_function("10k_files", |b| {
-        b.iter(|| discover_files(black_box(&opts)).expect("discover should not fail"));
+        b.iter_batched(
+            || {
+                let cache = repo.path().join(".ctx-optim/cache/discovery.json");
+                let _ = std::fs::remove_file(&cache);
+            },
+            |_| discover_files(black_box(&opts)).expect("discover should not fail"),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+/// Benchmark: warm discovery on the scale_test(10_000) scenario.
+/// P5 target: < 70ms (warm cache, no file changes).
+///
+/// We prime the cache with a single cold run BEFORE the benchmark loop, then
+/// every iter exercises the fast-path: parallel walk → all cache hits → skip
+/// Phase 1b/2 entirely.
+fn bench_discover_10k_warm(c: &mut Criterion) {
+    let repo = fixtures::scenarios::scale_test(10_000);
+    let config = Config::default();
+    let opts = DiscoveryOptions::from_config(&config, repo.path());
+
+    // Prime the cache once before timing.
+    discover_files(&opts).expect("priming run should succeed");
+
+    let mut group = c.benchmark_group("discover");
+    group.sample_size(20);
+    group.bench_function("10k_files_warm", |b| {
+        b.iter(|| discover_files(black_box(&opts)).expect("warm discover should not fail"));
     });
     group.finish();
 }
@@ -212,6 +246,7 @@ fn bench_full_pipeline_medium_files(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_discover_10k,
+    bench_discover_10k_warm,
     bench_score_pack_200,
     bench_full_pipeline_medium,
     bench_full_pipeline_large,

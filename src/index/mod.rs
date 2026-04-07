@@ -1,6 +1,9 @@
 /// File discovery via the `ignore` crate and git metadata.
 pub mod discovery;
 
+/// Persistent on-disk discovery cache (P5).
+pub mod cache;
+
 /// Exact-match (MD5) and near-duplicate (SimHash) deduplication.
 pub mod dedup;
 
