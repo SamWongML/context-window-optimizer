@@ -37,6 +37,28 @@ It scores every file by git recency, size, proximity to your focus area, and imp
 
 ### Install
 
+**Prebuilt binaries** (no Rust toolchain required) — download the archive for your platform from the [latest release](https://github.com/SamWongML/context_window_optimizer/releases/latest), extract it, and put `ctx-optim` on your `$PATH`.
+
+Or use the one-liner installers:
+
+```bash
+# macOS
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/SamWongML/context_window_optimizer/releases/latest/download/ctx-optim-installer.sh | sh
+
+# Windows (PowerShell)
+irm https://github.com/SamWongML/context_window_optimizer/releases/latest/download/ctx-optim-installer.ps1 | iex
+```
+
+> **macOS — first-run Gatekeeper warning.** The binary is not yet notarized by Apple, so on first launch macOS may say _"ctx-optim cannot be opened because the developer cannot be verified."_ Clear the quarantine flag once:
+> ```bash
+> xattr -dr com.apple.quarantine "$(which ctx-optim)"
+> ```
+> Or right-click the binary in Finder → **Open** → **Open**. Notarized builds are planned for v1.0.
+
+> **Windows — first-run SmartScreen warning.** The binary is not yet signed with a Windows code-signing certificate. On first launch you may see _"Windows protected your PC."_ Click **More info** → **Run anyway**. Signed builds are planned for v1.0.
+
+**Linux / other platforms, or if you want to build from source:**
+
 ```bash
 cargo install --path . --features full
 ```
