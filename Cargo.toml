@@ -36,7 +36,7 @@ tree-sitter-go = { version = "0.23", optional = true }
 
 # ── File Discovery & Git ──
 ignore = "0.4"                # .gitignore-aware recursive walk (used by ripgrep)
-git2 = "0.19"                 # libgit2 — recency, blame, change detection
+git2 = { version = "0.19", default-features = false }  # libgit2 — recency, blame, change detection (no ssh/https → no openssl)
 
 # ── Hashing / Dedup ──
 md-5 = "0.10"                 # Exact-match dedup
