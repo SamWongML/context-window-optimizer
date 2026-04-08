@@ -22,19 +22,34 @@ use crate::{
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PackContextInput {
     /// Absolute path to the repository root to analyze.
+    #[schemars(
+        description = "Absolute path to the repository root. Use the current working directory if the user did not specify one."
+    )]
     pub repo: String,
 
     /// Token budget for the packed context (default: 128 000).
+    #[schemars(
+        description = "Token budget for the packed context. Use 32000 for quick orientation, 128000 (default) for deep work, 200000+ only for large refactors."
+    )]
     pub budget: Option<usize>,
 
     /// Output level: `"l1"` (skeleton), `"l2"` (summaries), `"l3"` (full content, default), `"stats"`.
+    #[schemars(
+        description = "Output level: 'l1' = skeleton map of files+signatures (cheapest, best for first orientation), 'l2' = file summaries, 'l3' = full file contents (default, best for editing), 'stats' = sizing only without packing."
+    )]
     pub output: Option<String>,
 
     /// Paths to prioritise — files in these directories get a proximity signal boost.
+    #[schemars(
+        description = "1-4 paths (file or directory, relative to repo) the task is centered on — these get a proximity boost so nearby files are preferred. ALWAYS set this when the user named a feature, module, file, or directory."
+    )]
     pub focus: Option<Vec<String>>,
 
     /// Include function/struct/trait signatures in L1 output (requires AST feature).
     #[serde(default)]
+    #[schemars(
+        description = "Include function/struct/trait signatures in L1 output. Set true when using output='l1' to get a richer skeleton map. Requires the AST feature (enabled by default)."
+    )]
     pub include_signatures: Option<bool>,
 }
 
@@ -97,7 +112,7 @@ impl ContextOptimizerServer {
     /// Walks the repository, scores every file using recency/size/proximity signals,
     /// removes duplicates, and returns the optimal subset that fits within the budget.
     #[tool(
-        description = "Pack the most valuable code context for an LLM agent within a token budget. Walks the repo, deduplicates, scores, and selects files using a greedy knapsack algorithm."
+        description = "USE THIS FIRST when starting work in an unfamiliar repo, when a task spans more than ~5 files, or before running multiple grep/find/read calls just to orient. Returns the highest-value files for the task — scored by git recency, proximity to `focus` paths, dependency-graph distance, and size — packed into a token budget via knapsack selection with diversity decay. Set `focus` to the file or directory the task is about whenever the user names one. Output 'l1' = skeleton map (cheap first look), 'l3' = full file contents (default, best for editing), 'stats' = sizing only. Skip this tool for trivial single-file edits or when the user already pasted the relevant code."
     )]
     async fn pack_context(&self, params: Parameters<PackContextInput>) -> Result<String, String> {
         let input = params.0;
@@ -144,7 +159,7 @@ impl ContextOptimizerServer {
     ///
     /// Useful for understanding repo size and composition before committing to a pack.
     #[tool(
-        description = "Return index statistics (file count, total tokens, language breakdown) without packing context."
+        description = "Quickly report repo size (file count, total tokens, language breakdown) WITHOUT reading any file contents. Call this before `pack_context` when sizing an unknown repo to pick the right token budget, or when the user asks 'how big is this codebase' / 'what languages are in this repo'."
     )]
     async fn index_stats(&self, params: Parameters<IndexStatsInput>) -> Result<String, String> {
         let input = params.0;
